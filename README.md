@@ -50,11 +50,32 @@ corrupts WordPress's serialized PHP and empties theme options and page-builder
 layouts. Then verify on staging, issue SSL on the new host, and only then move
 DNS, with the old host left running as the rollback.
 
+## Moving something that isn't WordPress
+
+The nine phases are the same for every stack; only the commands change. Each
+platform has its own recipe at the same depth as the WordPress one:
+
+| Moving | Recipe |
+| --- | --- |
+| Static / generated site (Astro, Hugo, Eleventy, Jekyll, a Vite SPA) | [`references/static-sites.md`](./references/static-sites.md) |
+| PHP app — bespoke, Laravel, Symfony, Drupal, Joomla | [`references/php-apps.md`](./references/php-apps.md) |
+| Node app — Next.js, Nuxt, Remix, SvelteKit, Express, Strapi | [`references/node-apps.md`](./references/node-apps.md) |
+| PostgreSQL / SQLite / MongoDB / Redis | [`references/databases.md`](./references/databases.md) |
+| Off Wix, Squarespace, Webflow, Shopify, or cPanel with no shell | [`references/managed-platforms.md`](./references/managed-platforms.md) |
+| Off Vercel, Netlify or Cloudflare Pages onto your own server | [`references/managed-platforms.md`](./references/managed-platforms.md) § M-5 |
+| Changing stack — WordPress → Next.js, Squarespace → Astro | [`references/replatform.md`](./references/replatform.md) |
+
+Plus three that apply to every migration: [DNS and
+certificates](./references/dns-cutover.md), [moving a site that's still taking
+orders](./references/live-site-windows.md), and [symptom →
+cause](./references/troubleshooting.md).
+
 ## What's in the box
 
 | File | Purpose |
 | --- | --- |
 | `SKILL.md` | The workflow, the WordPress host-to-host recipe, and the safety doctrine Claude follows. |
+| `references/` | Per-platform recipes — static, PHP/Laravel, Node, databases, managed platforms, re-platforming — plus DNS cutover, live-site windows, and troubleshooting. |
 | `scripts/inventory.mjs` | Crawl the source site → complete URL inventory (JSON + CSV). |
 | `scripts/parity.mjs` | Compare old vs new URL-by-URL; the cutover gate. |
 | `scripts/redirects.mjs` | Generate 301 redirect configs (Caddy / nginx / Netlify / Next.js). |
@@ -158,6 +179,12 @@ what URLs you see, so none of them are trusted as fetch targets:
 - **Bounded everywhere else.** Requests time out at 15s, bodies are capped at
   5 MB, and crawls are bounded by `--max` pages and `--max-depth` levels. All
   the limits are in `LIMITS` at the top of `scripts/lib.mjs`.
+- **Generated config is not injectable.** `redirects.mjs` emits config you
+  paste into a web server, built from untrusted input — paths crawled off
+  another site, or a CSV someone sent you. It accepts only rooted paths and
+  `http(s)` destinations and rejects any pair carrying a character that could
+  terminate the generated directive, listing what it dropped rather than
+  passing it through silently.
 
 Each of these has a regression test — see [Tests](#tests).
 

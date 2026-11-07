@@ -238,13 +238,18 @@ export function urlOnOrigin(origin, path) {
  * Caddyfile / nginx conf / `_redirects`, so anything carrying a newline, a NUL,
  * or an off-origin host is dropped rather than emitted — a path harvested off a
  * crawled site must not be able to inject a config directive.
+ *
+ * `;` and `'` go too: `new URL` percent-encodes the other punctuation that
+ * matters (`"`, backtick, `<`, `>`) but leaves those two alone, and nginx reads
+ * them as a directive terminator and a string delimiter. Neither belongs in a
+ * path that has not been percent-encoded already.
  */
 const REDIRECT_BASE = 'https://redirect-map.invalid';
 
 export function safeRedirectPath(path) {
   if (typeof path !== 'string') return null;
   const raw = path.trim();
-  if (!raw || /[\s\r\n\0{}]/.test(raw)) return null;
+  if (!raw || /[\s\r\n\0{};']/.test(raw)) return null;
   let u;
   try {
     u = new URL(raw, REDIRECT_BASE);
@@ -262,7 +267,7 @@ export function safeRedirectPath(path) {
 export function safeRedirectTarget(target) {
   if (typeof target !== 'string') return null;
   const raw = target.trim();
-  if (!raw || /[\s\r\n\0{}]/.test(raw)) return null;
+  if (!raw || /[\s\r\n\0{};']/.test(raw)) return null;
   if (/^https?:\/\//i.test(raw)) {
     try {
       const u = new URL(raw);

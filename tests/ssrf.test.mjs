@@ -297,6 +297,8 @@ test('safeRedirectPath refuses anything that could inject a config directive', (
     'https://evil.example/x',
     '//evil.example/x',
     '/a b',
+    "/a;b { return 301 http://evil.example; }",
+    "/a'b",
     '',
     '   ',
     null,
@@ -310,7 +312,7 @@ test('safeRedirectTarget allows a path or an absolute http(s) URL, nothing else'
   assert.equal(safeRedirectTarget('/new'), '/new');
   assert.equal(safeRedirectTarget('https://new.example/x'), 'https://new.example/x');
   assert.equal(safeRedirectTarget('http://new.example/x'), 'http://new.example/x');
-  for (const bad of ['javascript:alert(1)', 'file:///etc/passwd', '/a\nx', '{block}', '', null]) {
+  for (const bad of ['javascript:alert(1)', 'file:///etc/passwd', '/a\nx', '{block}', '/a;b', "/a'b", '', null]) {
     assert.equal(safeRedirectTarget(bad), null, `${JSON.stringify(bad)} should be refused`);
   }
 });

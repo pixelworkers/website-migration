@@ -7,10 +7,13 @@ description: >-
   include "move my WordPress site to a new host", "migrate WordPress to a new
   server", "transfer my site off cPanel/WP Engine/GoDaddy/Bluehost/SiteGround",
   "WordPress migration", "migrate my site", "move off
-  Wordpress/Wix/Squarespace/Vercel/Netlify", "re-platform to Next.js",
-  "self-host this site", "port this site to a new stack", "move to a new
-  server", "migrate without losing SEO", or "cut over to the new site".
-  Runs a phased, verify-before-cutover workflow with read-only audit scripts.
+  Wordpress/Wix/Squarespace/Webflow/Shopify/Vercel/Netlify", "re-platform to
+  Next.js", "move my Laravel/PHP/Node app to a new server", "move my static
+  site to my own server", "migrate a Postgres/MySQL/Mongo database to a new
+  host", "get off cPanel", "self-host this site", "port this site to a new
+  stack", "move to a new server", "migrate without losing SEO", or "cut over to
+  the new site". Runs a phased, verify-before-cutover workflow with read-only
+  audit scripts, plus a concrete recipe per platform.
 license: MIT
 ---
 
@@ -34,8 +37,14 @@ accident. It is built on one rule:
   case. Follow the general workflow below, and use the step-by-step recipe in
   [WordPress → WordPress: moving one site to a new host](#wordpress--wordpress-moving-one-site-to-a-new-host)
   for the concrete commands.
-- Re-platforming (WordPress → Next.js, Wix/Squarespace → static, etc.)
-- Re-hosting (managed platform → your own server, or server → server)
+- Re-hosting anything else — static site, PHP app, Laravel, a Node server —
+  from one box to another. See [Recipes by platform](#recipes-by-platform).
+- Getting off a closed platform: Wix, Squarespace, Webflow, Shopify, or a
+  cPanel host with no shell → [`references/managed-platforms.md`](references/managed-platforms.md).
+- Leaving a managed deploy platform: Vercel, Netlify, Cloudflare Pages → your
+  own server → [`references/managed-platforms.md`](references/managed-platforms.md) § M-5.
+- Re-platforming — WordPress → Next.js, Squarespace → Astro, PHP → headless →
+  [`references/replatform.md`](references/replatform.md).
 - Framework upgrades that change URLs or routing
 - Consolidating several sites, or splitting one apart
 - Any move where losing a URL, content, or ranking would hurt
@@ -80,10 +89,11 @@ saying so in the same session.
 
 Work the phases in order. Do not skip ahead to cutover.
 
-Moving a WordPress site to a new host? These phases still govern — the
-WordPress-specific commands for each are in
-[WordPress → WordPress](#wordpress--wordpress-moving-one-site-to-a-new-host)
-below.
+The phases are the same whatever the stack. The *commands* for each phase
+depend on it: WordPress host-to-host is written out in full
+[below](#wordpress--wordpress-moving-one-site-to-a-new-host), and every other
+platform has its own recipe in [Recipes by platform](#recipes-by-platform).
+Read the phases first; then work the recipe that matches.
 
 ### 1. Discover
 
@@ -258,6 +268,50 @@ node scripts/parity.mjs https://oldsite.com https://realdomain.com \
   window.
 - Only after the window is clean and the user approves: decommission the old
   host.
+
+## Recipes by platform
+
+The nine phases above are the whole method. These are the concrete commands for
+each stack, at the same depth as the WordPress recipe — read the phases first,
+then open the one that matches what you are moving.
+
+| Recipe | Use it for |
+| --- | --- |
+| [WordPress → WordPress](#wordpress--wordpress-moving-one-site-to-a-new-host) (below) | WordPress staying WordPress, new box underneath |
+| [`references/static-sites.md`](references/static-sites.md) | Hand-written HTML, Astro, Hugo, Eleventy, Jekyll, a Vite SPA, a static export |
+| [`references/php-apps.md`](references/php-apps.md) | Bespoke PHP, Laravel, Symfony, CodeIgniter, Drupal, Joomla |
+| [`references/node-apps.md`](references/node-apps.md) | Next.js, Nuxt, Remix, SvelteKit, Express, NestJS, Strapi, Payload |
+| [`references/databases.md`](references/databases.md) | PostgreSQL, SQLite, MongoDB, Redis; moving between engines |
+| [`references/managed-platforms.md`](references/managed-platforms.md) | Off Wix / Squarespace / Webflow / Shopify; off Vercel / Netlify / Pages; cPanel with no shell |
+| [`references/replatform.md`](references/replatform.md) | Changing the stack itself — WordPress → Next.js, Squarespace → Astro |
+
+And the three that apply to every migration regardless of stack:
+
+| Reference | Covers |
+| --- | --- |
+| [`references/dns-cutover.md`](references/dns-cutover.md) | TTL arithmetic, which records to touch, certificates before DNS, Cloudflare, watching it land |
+| [`references/live-site-windows.md`](references/live-site-windows.md) | Not losing writes while you move a site that is still being used: maintenance windows, two-pass transfers, queues, mail, scheduled jobs |
+| [`references/troubleshooting.md`](references/troubleshooting.md) | Symptom → cause, for every stack here |
+
+### Picking the right one
+
+- **Same stack, new box** → the recipe for that stack. Phases 1–9, nothing
+  clever. This is the easy case and it stays easy if you do not also redesign
+  anything.
+- **New stack** → [`references/replatform.md`](references/replatform.md) first,
+  because the URL contract has to be settled before any code is written, then
+  the target stack's recipe for the hosting half.
+- **No shell on the source** →
+  [`references/managed-platforms.md`](references/managed-platforms.md) for the
+  extraction, then the normal recipe from the point where the files are on your
+  machine.
+- **Site is still taking orders or logins** →
+  [`references/live-site-windows.md`](references/live-site-windows.md) before you
+  schedule anything.
+
+Whatever the stack, the gate does not move: the old site stays live, parity is
+proven on a temporary URL, the redirect map is loaded before cutover, and DNS is
+last.
 
 ## WordPress → WordPress: moving one site to a new host
 
@@ -728,6 +782,13 @@ host stays untouched and running.
 - Only once the window is clean **and the user approves**: cancel the old host.
   Keep the WP-2 backups well past that date.
 
+Deeper on the parts of this that are not WordPress-specific:
+[`references/dns-cutover.md`](references/dns-cutover.md) for TTL, certificates
+and Cloudflare; [`references/live-site-windows.md`](references/live-site-windows.md)
+for moving a site that is still taking orders;
+[`references/troubleshooting.md`](references/troubleshooting.md) for symptom →
+cause.
+
 ### A note on the migration plugins
 
 **All-in-One WP Migration**, **Duplicator** and **Migrate Guru** are what most
@@ -761,6 +822,10 @@ read-only over HTTP. They write reports to `--out` (default `./out`).
 
 Run any with no args to see usage. See `README.md` for a full worked example.
 
+The per-platform recipes in `references/` use these same four scripts for the
+inventory, parity and redirect phases — the scripts are stack-agnostic, because
+they only ever speak HTTP.
+
 They are read-only by construction and bounded on every axis, so pointing one at
 a site you do not control is safe for you and for it:
 
@@ -784,6 +849,11 @@ a site you do not control is safe for you and for it:
 - **The HTML and XML parsers are linear.** Markup is walked with index scans,
   not backtracking regexes, so a page crafted to make a parser go quadratic
   costs milliseconds instead of minutes.
+- `redirects.mjs` generates config you will paste into a web server, from paths
+  it crawled off someone else's site or read out of a client's CSV. It accepts
+  only rooted paths and `http(s)` destinations, and drops any pair carrying a
+  character that could close the generated directive early — reporting each one
+  so you can percent-encode it by hand rather than pasting it unnoticed.
 
 The limits live in one place — `LIMITS` at the top of `scripts/lib.mjs`. Raise
 them deliberately if a site genuinely needs it.
