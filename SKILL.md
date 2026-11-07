@@ -267,20 +267,32 @@ site actually uses.
 Non-negotiable, and it is the step that makes every later step safe.
 
 ```bash
+# Name the backups ONCE and reuse the variables everywhere below, including in
+# WP-5. Never re-type $(date +%F) in a later step — it re-evaluates to *today*,
+# so a migration that spans midnight (or resumes the next day) silently points
+# at a dump that does not exist.
+DUMP=~/backup-$(date +%F)-db.sql
+FILES=~/backup-$(date +%F)-files.tar.gz
+
 # Database (wp-cli handles charset and locking correctly)
-wp db export ~/backup-$(date +%F)-db.sql --single-transaction --default-character-set=utf8mb4
+wp db export "$DUMP" --single-transaction --default-character-set=utf8mb4
 # no wp-cli:
 mysqldump --single-transaction --quick --default-character-set=utf8mb4 \
-  --routines --triggers --events -u DBUSER -p DBNAME > ~/backup-$(date +%F)-db.sql
+  --routines --triggers --events -u DBUSER -p DBNAME > "$DUMP"
 
 # Files (the whole WordPress root)
-tar -czf ~/backup-$(date +%F)-files.tar.gz -C /path/to/wordpress .
+tar -czf "$FILES" -C /path/to/wordpress .
 
 # Verify the dump is actually complete, not a truncated half-write
-tail -1 ~/backup-*-db.sql      # must read: -- Dump completed on …
-ls -lh ~/backup-*             # non-trivial sizes
-sha256sum ~/backup-*          # record, re-check after transfer
+tail -1 "$DUMP"               # must read: -- Dump completed on …
+ls -lh "$DUMP" "$FILES"       # non-trivial sizes
+sha256sum "$DUMP" "$FILES"    # record, re-check after transfer
+# sha256sum is GNU; on macOS/BSD use: shasum -a 256 "$DUMP" "$FILES"
 ```
+
+Write `$DUMP` down. Later steps refer to it by that exact filename, and if you
+come back in a new shell you must set the variable again rather than regenerate
+it from today's date.
 
 Pull both off the source host to somewhere else. Then record the current DNS
 zone — every A, AAAA, CNAME, MX, TXT record and its TTL — so a rollback is a
@@ -350,12 +362,16 @@ ssh user@oldhost "tar -czf - -C /path/to/wordpress ." | tar -xzf - -C /var/www/e
 ### WP-5 · Move the database
 
 ```bash
-# source (already exported in WP-2 — reuse that dump)
-gzip -c ~/backup-$(date +%F)-db.sql > /tmp/db.sql.gz
+# source — reuse the WP-2 dump via $DUMP; in a new shell, set it to that exact
+# filename again instead of re-running $(date +%F)
+gzip -c "$DUMP" > /tmp/db.sql.gz
 scp /tmp/db.sql.gz user@newhost:/tmp/
 
-# destination
+# destination — the dump holds every user's password hash and all site secrets,
+# and /tmp is world-readable. Lock it down the moment it lands.
+chmod 600 /tmp/db.sql.gz
 gunzip /tmp/db.sql.gz
+chmod 600 /tmp/db.sql
 wp db create                     # or create it by hand with the right charset
 wp db import /tmp/db.sql
 # no wp-cli:
@@ -375,6 +391,17 @@ wp db query "SELECT COUNT(*) FROM wp_users"
 Compare each number against the same query on the source. A short table list
 usually means the dump was truncated or `max_allowed_packet` cut the import —
 raise it and re-import rather than patching around it.
+
+Only once those counts match, delete the working copies of the dump — on both
+hosts. The backup from WP-2 stays (that is the rollback); the `/tmp` copies are
+plaintext user password hashes sitting in a world-readable directory:
+
+```bash
+# destination
+rm -f /tmp/db.sql /tmp/db.sql.gz
+# source
+rm -f /tmp/db.sql.gz
+```
 
 Now write `wp-config.php` for the new host:
 
@@ -494,6 +521,9 @@ RewriteRule . /index.php [L]
 ```nginx
 location / { try_files $uri $uri/ /index.php?$args; }
 location ~ \.php$ {
+  try_files $uri =404;        # never omit: with cgi.fix_pathinfo=1 this is the
+                              # difference between serving PHP and letting an
+                              # uploaded .jpg execute as PHP
   include fastcgi_params;
   fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
   fastcgi_pass unix:/run/php/php8.2-fpm.sock;
