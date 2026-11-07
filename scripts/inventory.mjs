@@ -11,22 +11,48 @@
 //   --concurrency    parallel requests (default: 6)
 //   --crawl          force a link crawl even if a sitemap exists
 //   --delay <ms>     politeness delay between requests (default: 0)
+//   --force          overwrite existing files in <out> (default: refuse)
 //
 // Writes:
 //   <out>/inventory.json   full per-URL records
 //   <out>/inventory.csv    spreadsheet-friendly summary
 //
 // This script only issues GET requests. It never writes to the target site.
+//
+// Every URL fetched is either the one you passed on the command line or one
+// that stayed on its origin: sitemap entries and crawled links are filtered by
+// lib.mjs before any request, so a hostile sitemap cannot point the crawler at
+// an internal address or a cloud metadata endpoint.
 
-import { parseArgs, getSitemapUrls, crawl, fetchText, extract, pool, writeOut, toPathKey } from './lib.mjs';
+import {
+  parseArgs,
+  getSitemapUrls,
+  crawl,
+  fetchText,
+  extract,
+  pool,
+  writeOut,
+  toPathKey,
+  filterRemoteUrls,
+} from './lib.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 const base = args._[0];
 if (!base) {
-  console.error('Usage: node scripts/inventory.mjs <baseUrl> [--out out] [--max 500] [--max-depth 10] [--crawl]');
+  console.error('Usage: node scripts/inventory.mjs <baseUrl> [--out out] [--max 500] [--max-depth 10] [--crawl] [--force]');
+  process.exit(1);
+}
+let origin;
+try {
+  const u = new URL(base);
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('not http(s)');
+  origin = u.origin;
+} catch {
+  console.error(`Not an http(s) URL: ${base}`);
   process.exit(1);
 }
 const outDir = args.out || 'out';
+const force = !!args.force;
 const max = Number(args.max || 500);
 const maxDepth = Number(args['max-depth'] || 10);
 const concurrency = Number(args.concurrency || 6);
@@ -45,7 +71,13 @@ async function main() {
 
   if (!args.crawl) {
     console.log('Looking for sitemap…');
-    urls = await getSitemapUrls(base, { log: (m) => console.log(m) });
+    const refused = [];
+    urls = await getSitemapUrls(base, { log: (m) => console.log(m), refused });
+    if (refused.length) {
+      console.log(`Refused ${refused.length} sitemap entries that left ${origin} (not fetched):`);
+      for (const r of refused.slice(0, 20)) console.log(`  ! ${r}`);
+      if (refused.length > 20) console.log(`  … and ${refused.length - 20} more`);
+    }
     if (urls.length) console.log(`Sitemap found: ${urls.length} URLs`);
   }
 
@@ -62,7 +94,8 @@ async function main() {
       },
     });
   } else {
-    urls = urls.slice(0, max);
+    // Belt and braces: getSitemapUrls already dropped off-origin entries.
+    urls = filterRemoteUrls(urls, origin).allowed.slice(0, max);
     await pool(urls, concurrency, async (url) => {
       const res = await fetchText(url);
       const extracted = res.text ? extract(res.text, url) : {};
@@ -83,7 +116,7 @@ async function main() {
     errors: records.filter((r) => r.error).length,
   };
 
-  writeOut(`${outDir}/inventory.json`, JSON.stringify({ summary, pages: records }, null, 2));
+  writeOut(`${outDir}/inventory.json`, JSON.stringify({ summary, pages: records }, null, 2), { force });
 
   const header = ['url', 'path', 'status', 'redirectedTo', 'title', 'metaDescription', 'h1', 'canonical', 'wordCount', 'ms', 'error'];
   const csv = [header.join(',')]
@@ -95,7 +128,7 @@ async function main() {
       ),
     )
     .join('\n');
-  writeOut(`${outDir}/inventory.csv`, csv);
+  writeOut(`${outDir}/inventory.csv`, csv, { force });
 
   console.log('');
   console.log(`Done. ${records.length} pages.`);
@@ -133,6 +166,6 @@ function countBy(arr, fn) {
 }
 
 main().catch((e) => {
-  console.error(e);
+  console.error(String(e.message || e));
   process.exit(1);
 });

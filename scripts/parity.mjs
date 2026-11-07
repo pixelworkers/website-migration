@@ -13,6 +13,7 @@
 //   --out <dir>           output dir (default: ./out)
 //   --concurrency <n>     default 6
 //   --word-drop <pct>     flag pages whose word count fell by more than pct (default 40)
+//   --force               overwrite existing files in <out> (default: refuse)
 //
 // If --inventory is omitted, the old site's sitemap is used to derive paths.
 //
@@ -21,22 +22,48 @@
 //   <out>/parity-report.md    human-readable, problems first
 //
 // Read-only over HTTP against both sites.
+//
+// Paths come out of an inventory file or a sitemap — remote data either way —
+// so each one is resolved onto the origin you named with `new URL(path, origin)`
+// and the result's origin is asserted before any request. A path like
+// `//evil.example/x` or `https://169.254.169.254/` cannot retarget the fetch.
 
 import { readFileSync } from 'node:fs';
-import { parseArgs, getSitemapUrls, fetchText, extract, pool, writeOut, toPathKey } from './lib.mjs';
+import {
+  parseArgs,
+  getSitemapUrls,
+  fetchText,
+  extract,
+  pool,
+  writeOut,
+  toPathKey,
+  urlOnOrigin,
+} from './lib.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 const oldBase = args._[0];
 const newBase = args._[1];
 if (!oldBase || !newBase) {
-  console.error('Usage: node scripts/parity.mjs <oldBase> <newBase> [--inventory out/inventory.json] [--out out]');
+  console.error('Usage: node scripts/parity.mjs <oldBase> <newBase> [--inventory out/inventory.json] [--out out] [--force]');
   process.exit(1);
 }
 const outDir = args.out || 'out';
+const force = !!args.force;
 const concurrency = Number(args.concurrency || 6);
 const wordDropPct = Number(args['word-drop'] || 40);
-const oldOrigin = new URL(oldBase).origin;
-const newOrigin = new URL(newBase).origin;
+
+function originOf(arg, label) {
+  try {
+    const u = new URL(arg);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('not http(s)');
+    return u.origin;
+  } catch {
+    console.error(`${label} is not an http(s) URL: ${arg}`);
+    return process.exit(1);
+  }
+}
+const oldOrigin = originOf(oldBase, '<oldBase>');
+const newOrigin = originOf(newBase, '<newBase>');
 
 async function paths() {
   if (args.inventory) {
@@ -72,9 +99,21 @@ async function main() {
   const list = await paths();
   console.log(`Comparing ${list.length} paths: ${oldOrigin} → ${newOrigin}`);
 
-  const rows = await pool(list, concurrency, async (path) => {
-    const oldUrl = oldOrigin + path;
-    const newUrl = newOrigin + path;
+  const skipped = [];
+  const comparable = list.filter((path) => {
+    if (urlOnOrigin(oldOrigin, path) && urlOnOrigin(newOrigin, path)) return true;
+    skipped.push(path);
+    return false;
+  });
+  if (skipped.length) {
+    console.log(`Skipped ${skipped.length} entries that do not resolve onto both origins:`);
+    for (const p of skipped.slice(0, 20)) console.log(`  ! ${p}`);
+    if (skipped.length > 20) console.log(`  … and ${skipped.length - 20} more`);
+  }
+
+  const rows = await pool(comparable, concurrency, async (path) => {
+    const oldUrl = urlOnOrigin(oldOrigin, path);
+    const newUrl = urlOnOrigin(newOrigin, path);
     const [o, n] = await Promise.all([fetchText(oldUrl), fetchText(newUrl)]);
     const oldP = page(o, o.text ? extract(o.text, oldUrl) : {});
     const newP = page(n, n.text ? extract(n.text, newUrl) : {});
@@ -109,9 +148,10 @@ async function main() {
     passing: rows.length - problems.length,
     problems: problems.length,
     missing: rows.filter((r) => r.new.status >= 400 || r.new.status === 0).length,
+    skipped: skipped.length,
   };
 
-  writeOut(`${outDir}/parity-report.json`, JSON.stringify({ summary, rows }, null, 2));
+  writeOut(`${outDir}/parity-report.json`, JSON.stringify({ summary, rows, skipped }, null, 2), { force });
 
   const md = [];
   md.push(`# Parity report`);
@@ -122,6 +162,10 @@ async function main() {
   md.push('');
   md.push(`**${summary.passing}/${summary.total} paths pass.** ${summary.problems} with issues, ${summary.missing} missing on the new site.`);
   md.push('');
+  if (skipped.length) {
+    md.push(`${skipped.length} inventory entries were skipped: they do not resolve onto both origins (absolute off-site URLs, or paths carrying a host). Listed under \`skipped\` in the JSON report.`);
+    md.push('');
+  }
   if (problems.length) {
     md.push(`## Problems (${problems.length})`);
     md.push('');
@@ -138,7 +182,7 @@ async function main() {
     md.push('Every inventoried path resolves on the new site with equivalent content. Safe to proceed to redirect-map review and cutover checks.');
   }
   md.push('');
-  writeOut(`${outDir}/parity-report.md`, md.join('\n'));
+  writeOut(`${outDir}/parity-report.md`, md.join('\n'), { force });
 
   console.log('');
   console.log(`${summary.passing}/${summary.total} pass. ${summary.problems} problems, ${summary.missing} missing.`);
@@ -147,6 +191,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e);
+  console.error(String(e.message || e));
   process.exit(1);
 });

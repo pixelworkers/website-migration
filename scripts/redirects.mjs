@@ -14,24 +14,59 @@
 //   --format            all | caddy | nginx | netlify | next   (default: all)
 //   --out <dir>         output dir (default: ./out)
 //   --code              301 (permanent, default) or 302
+//   --force             overwrite existing files in <out> (default: refuse)
 //
 // Only generates config text on disk. Applies nothing.
+//
+// Both sides of every pair are normalized before they are emitted. The paths
+// come from an inventory of a crawled site or a user-supplied CSV, and the
+// output is pasted verbatim into a Caddyfile / nginx conf / `_redirects`, so a
+// path carrying a newline, a brace, or a host of its own is dropped rather than
+// written — a crawled page must not be able to inject a config directive.
 
 import { readFileSync } from 'node:fs';
-import { parseArgs, writeOut, toPathKey } from './lib.mjs';
+import { join } from 'node:path';
+import { parseArgs, writeOut, toPathKey, safeRedirectPath, safeRedirectTarget } from './lib.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 const outDir = args.out || 'out';
 const format = (args.format || 'all').toLowerCase();
 const code = String(args.code || 301);
+const force = !!args.force;
+const dropped = [];
+
+/** Keep a pair only if both sides normalize to something safe to emit. */
+function clean(from, to) {
+  const f = safeRedirectPath(from);
+  const t = safeRedirectTarget(to);
+  if (!f || !t) {
+    dropped.push(`${JSON.stringify(String(from))} -> ${JSON.stringify(String(to))}`);
+    return null;
+  }
+  return [f, t];
+}
+
+function dedupe(pairs) {
+  const seen = new Set();
+  const out = [];
+  for (const [f, t] of pairs) {
+    if (seen.has(f)) continue;
+    seen.add(f);
+    out.push([f, t]);
+  }
+  return out;
+}
 
 function pairsFromInventory(file) {
   const data = JSON.parse(readFileSync(file, 'utf8'));
   const pages = data.pages || data;
-  return pages
-    .map((p) => p.path || toPathKey(p.url))
-    .filter((v, i, a) => a.indexOf(v) === i)
-    .map((path) => [path, path]); // identity: same path on the new host
+  if (!Array.isArray(pages)) throw new Error(`${file}: expected an array of pages`);
+  return dedupe(
+    pages
+      .map((p) => (p && (p.path || (p.url && toPathKey(p.url)))) || '')
+      .map((path) => clean(path, path)) // identity: same path on the new host
+      .filter(Boolean),
+  );
 }
 
 function pairsFromMap(file) {
@@ -41,9 +76,10 @@ function pairsFromMap(file) {
     const [from, to] = line.split(',').map((s) => s.trim());
     if (!from || !to) continue;
     if (/^old_?path$/i.test(from)) continue; // skip header
-    pairs.push([from, to]);
+    const pair = clean(from, to);
+    if (pair) pairs.push(pair);
   }
-  return pairs;
+  return dedupe(pairs);
 }
 
 if (!args.inventory && !args.map) {
@@ -51,7 +87,18 @@ if (!args.inventory && !args.map) {
   process.exit(1);
 }
 
-const pairs = args.map ? pairsFromMap(args.map) : pairsFromInventory(args.inventory);
+let pairs;
+try {
+  pairs = args.map ? pairsFromMap(args.map) : pairsFromInventory(args.inventory);
+} catch (e) {
+  console.error(String(e.message || e));
+  process.exit(1);
+}
+if (dropped.length) {
+  console.error(`Dropped ${dropped.length} unusable pair(s) — a redirect path must be a plain path with no host, whitespace, braces or newlines:`);
+  for (const d of dropped.slice(0, 20)) console.error(`  ! ${d}`);
+  if (dropped.length > 20) console.error(`  … and ${dropped.length - 20} more`);
+}
 if (!pairs.length) {
   console.error('No redirect pairs derived. Check the input file.');
   process.exit(1);
@@ -89,7 +136,12 @@ for (const fmt of targets) {
     console.error(`Unknown format: ${fmt}. Use all|caddy|nginx|netlify|next.`);
     process.exit(1);
   }
-  const path = `${outDir}/${exts[fmt]}`;
-  writeOut(path, generators[fmt]());
-  console.log(`Wrote ${path} (${pairs.length} redirects)`);
+  try {
+    const written = writeOut(join(outDir, exts[fmt]), generators[fmt](), { force });
+    console.log(`Wrote ${written} (${pairs.length} redirects)`);
+  } catch (e) {
+    console.error(String(e.message || e));
+    process.exit(1);
+  }
 }
+if (dropped.length) process.exitCode = 2; // non-zero: the input had bad rows

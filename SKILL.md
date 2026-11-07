@@ -56,8 +56,12 @@ saying so in the same session.
 2. **Snapshot before you migrate.** Confirm a full backup of the source exists
    (files + database + DNS records as they stand today) before any content
    move. Write down the current DNS records so a rollback is a copy-paste away.
-3. **Stand the new site up on a temporary URL.** A staging subdomain or preview
-   URL. The new site must be fully testable without any DNS change.
+3. **Stand the new site up on a temporary URL, and keep it out of the index.**
+   A staging subdomain or preview URL. The new site must be fully testable
+   without any DNS change — and it must be `noindex` for as long as it lives
+   there, or Google indexes the staging host and you end up competing with
+   yourself. Removing that `noindex` is a step in the cutover, not an
+   afterthought.
 4. **Prove parity before cutover.** Every URL the old site answered, the new one
    must answer — with equivalent content — or carry an intentional 301. Run
    `parity.mjs` and resolve every problem it reports. A non-empty problem list
@@ -127,6 +131,37 @@ metadata (titles, descriptions, canonical, Open Graph), and structured data.
 Re-point integrations at test/staging credentials where possible. Nothing here
 touches the live site.
 
+**Block search engines on the staging host, from the first deploy.** A staging
+copy of a real site is a duplicate of it; if Google crawls it you get split
+signals, the wrong host ranking, and a staging URL showing up in results that
+outlives the migration. Do all three — any one of them alone has a hole:
+
+```
+X-Robots-Tag: noindex, nofollow        # response header, covers PDFs and assets too
+<meta name="robots" content="noindex, nofollow">   # every page, in <head>
+```
+
+```
+# robots.txt on the staging host only
+User-agent: *
+Disallow: /
+```
+
+- On WordPress staging: Settings → Reading → *Discourage search engines*, which
+  sets both the meta tag and `robots.txt`. Verify it rather than trusting it.
+- Put HTTP basic auth on staging as well where you can. It is the only one of
+  these that a crawler cannot ignore, and it keeps the client's unfinished
+  rebuild away from the public.
+- `robots.txt` alone does **not** remove a URL already indexed, and `Disallow`
+  blocks the crawl that would otherwise *see* your `noindex`. That is why the
+  header and the meta tag matter more than the `robots.txt`.
+- Keep canonical tags on staging pointing at the **final** production URLs, not
+  at the staging host — see the parity check for `canonical points off-site`.
+
+Write down, now, that this has to come off at cutover. Staging `noindex` that
+ships to production is the single most common way a migrated site loses all its
+traffic the week after it goes live.
+
 ### 5. Verify parity (the gate)
 
 This is the step that separates a safe migration from a disaster.
@@ -173,8 +208,29 @@ Do not proceed until all are true:
 - [ ] Analytics/search console/forms/integrations verified on staging
 - [ ] SSL ready for the real domain on the new host
 - [ ] DNS TTL lowered (e.g. 300s) in advance
+- [ ] **Every place the staging `noindex` lives is written down** — response
+      header, `<meta robots>`, `robots.txt`, WordPress *Discourage search
+      engines*, CDN/host-level rule, basic auth — so the next item can be done
+      without missing one
+- [ ] Canonical tags on the rebuild point at the production URLs, not staging
 - [ ] Old host will stay running 48–72h post-cutover
 - [ ] Rollback steps written down; user has approved cutover
+
+**At cutover, remove the staging `noindex`.** Go down that list and clear every
+entry: the `X-Robots-Tag` header, the `<meta name="robots">` tag,
+`Disallow: /` in `robots.txt`, WordPress *Discourage search engines*, any
+host- or CDN-level rule, and basic auth. Then prove it on the live domain before
+you call the migration done:
+
+```bash
+curl -sI https://realdomain.com/ | grep -i x-robots-tag        # expect nothing
+curl -s  https://realdomain.com/ | grep -i 'name="robots"'     # expect nothing, or index,follow
+curl -s  https://realdomain.com/robots.txt                     # expect no blanket Disallow: /
+```
+
+A site that goes live still carrying `noindex` looks completely fine to
+everyone, including the client, right up until the traffic disappears a week
+later. These three commands are the cheapest insurance in the whole migration.
 
 ### 8. Cutover
 
@@ -191,8 +247,12 @@ node scripts/parity.mjs https://oldsite.com https://realdomain.com \
 
 ### 9. Post-cutover
 
+- Re-run the three `curl` checks above against the live domain. Confirm no
+  `noindex` survived cutover before anything else.
 - Submit the new sitemap to Google Search Console; watch coverage + 404s for
-  1–2 weeks.
+  1–2 weeks. Use the URL Inspection tool on the homepage and one deep page —
+  it reports indexability directly, and it is the check that catches a
+  host-level `noindex` the `curl` greps missed.
 - Monitor the live site (errors, Core Web Vitals, form submissions).
 - Keep the old host and the rollback path available through the monitoring
   window.
@@ -676,12 +736,29 @@ a site you do not control is safe for you and for it:
 
 - `GET`/`HEAD` only. No writes, no shell-out, no `eval`, no credentials, no
   filesystem access beyond the `--out` directory.
-- **Only the origin you name is crawled.** A `3xx` that points at another host —
-  an internal address, a cloud metadata endpoint, a third-party domain — is
-  reported, never followed. Same-host and www/apex redirects are followed, up to
-  5 hops.
+- **Only the origin you name is fetched.** Every URL that arrives as remote data
+  — a sitemap `<loc>`, a child sitemap, an `<a href>`, a `Location` header, a
+  path read out of an inventory file — is checked against that origin before any
+  request. Off-origin entries are reported, never fetched. Same-host and
+  www/apex redirects are followed, up to 5 hops.
+- **Private addresses are refused outright.** Loopback, RFC1918, CGNAT,
+  link-local, `*.local`/`*.internal`, and cloud instance-metadata endpoints
+  (`169.254.169.254` and friends) are never fetched on the strength of remote
+  content. A hostile sitemap cannot make the machine running an audit read its
+  own metadata service. Auditing a genuinely local staging site still works: the
+  origin you name is yours to name.
+- **Nothing is overwritten by accident.** Output stays inside the working
+  directory, and an existing file is left alone unless you pass `--force`.
 - Every request has a 15s timeout; response bodies are capped at 5 MB; crawls
   stop at `--max` pages (ceiling 5000) and `--max-depth` levels (default 10).
+- **The HTML and XML parsers are linear.** Markup is walked with index scans,
+  not backtracking regexes, so a page crafted to make a parser go quadratic
+  costs milliseconds instead of minutes.
 
 The limits live in one place — `LIMITS` at the top of `scripts/lib.mjs`. Raise
 them deliberately if a site genuinely needs it.
+
+Run the test suite with `node --test tests/*.test.mjs`. It covers the two things
+this tooling is actually exposed to — SSRF through URLs harvested off a remote
+site, and quadratic parsing of hostile markup — with regression tests built at
+the real 5 MB body cap and a hard time budget. CI runs it on Linux and macOS.
