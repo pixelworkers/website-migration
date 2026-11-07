@@ -56,15 +56,41 @@ DNS, with the old host left running as the rollback.
 | `scripts/redirects.mjs` | Generate 301 redirect configs (Caddy / nginx / Netlify / Next.js). |
 | `scripts/linkcheck.mjs` | Crawl a site and report broken links. |
 | `scripts/lib.mjs` | Shared, dependency-free HTTP + HTML helpers. |
+| `tests/` | Regression tests for the SSRF guards and the parser bounds. `node --test tests/*.test.mjs`. |
 
 ## Requirements
 
-- Node.js 18 or newer (uses built-in `fetch`). Tested on Node 22.
+- Node.js 18 or newer (uses built-in `fetch`). Tested on Node 20 and 22.
 - No npm install. No dependencies. The scripts only issue HTTP `GET`/`HEAD`
   requests and write report files — they never mutate a target site.
-- **The scripts are read-only and crawl only the origin you point them at:** a
-  redirect to a different host is reported, not followed, and every request is
-  bounded by a timeout, a response-size cap, and page/depth limits.
+- **The scripts are read-only and fetch only the origin you point them at:**
+  every URL that arrives as remote data — a sitemap entry, an `<a href>`, a
+  `Location` header, a path in an inventory file — is checked against that
+  origin first, and every request is bounded by a timeout, a response-size cap,
+  and page/depth limits.
+
+## Tests
+
+```bash
+node --test tests/*.test.mjs
+```
+
+No install step; the tests use Node's built-in runner and spin up local HTTP
+servers. They cover the two things this tooling is genuinely exposed to when
+pointed at a site someone else controls:
+
+- **SSRF through harvested URLs.** A hostile `sitemap.xml` listing off-origin
+  `<loc>` entries, an off-origin child sitemap, an `<a href>` pointing at
+  `169.254.169.254` or a LAN address, an inventory path carrying a host of its
+  own. Each test asserts that a stand-in "metadata service" receives *zero*
+  requests and that nothing off-origin reaches the report files.
+- **Quadratic parsing.** Every hostile markup shape is built at the real 5 MB
+  body cap (`'<script '` repeated, unclosed `<title>` repeated, half a megabyte
+  of `name="description" `, bare `<` to the cap) and asserted to parse in well
+  under a second, so a timing regression fails in CI rather than in front of a
+  client's site.
+
+CI runs the suite plus `node --check` on every script, on Linux and macOS.
 
 ## Worked example
 
@@ -74,8 +100,12 @@ Migrating `https://oldsite.com` to a rebuild staged at
 ```bash
 # 1. Inventory the live source (read-only)
 node scripts/inventory.mjs https://oldsite.com --out out
+# re-running into the same --out? the scripts refuse to clobber; pass --force
 
-# 2. Build the new site on its staging URL (your work)
+# 2. Build the new site on its staging URL (your work).
+#    Keep staging noindex the whole time it lives there — X-Robots-Tag header,
+#    <meta name="robots">, robots.txt — and remove every one of them at cutover.
+#    See "Rebuild on staging" in SKILL.md.
 
 # 3. Prove parity — this is the gate. Resolve every problem it reports.
 node scripts/parity.mjs https://oldsite.com https://staging.newsite.com \
@@ -100,11 +130,32 @@ can gate a CI pipeline or a cutover script.
 
 The scripts are read-only over HTTP by design — `GET`/`HEAD` only, no shell-out,
 no `eval`, no credentials, and no filesystem access outside the `--out`
-directory. They stay on the origin you give them: an off-host redirect is
-reported rather than followed, so a crawl cannot be bounced to an internal
-address or a third-party site. Requests time out at 15s, bodies are capped at
-5 MB, and crawls are bounded by `--max` pages and `--max-depth` levels. All the
-limits are in `LIMITS` at the top of `scripts/lib.mjs`.
+directory.
+
+Pointing an audit at a site you do not control means the site gets to choose
+what URLs you see, so none of them are trusted as fetch targets:
+
+- **Origin-restricted.** Sitemap `<loc>` entries, child sitemaps, `<a href>`
+  targets, `Location` headers and inventory paths are all checked against the
+  origin you named before any request. Off-origin entries are reported in the
+  report files, never fetched. Paths are resolved with `new URL(path, origin)`
+  and the result's origin is asserted, rather than concatenated onto a string.
+- **No private addresses.** Loopback, RFC1918, CGNAT, link-local,
+  `*.local`/`*.internal` and cloud instance-metadata endpoints
+  (`169.254.169.254` and its equivalents) are refused on the strength of remote
+  content — a hostile sitemap cannot make the auditing machine read its own IAM
+  credentials. Auditing a local staging site still works; the origin you name is
+  yours to name.
+- **Linear parsers.** HTML and XML are walked with index scans instead of
+  backtracking regexes, so markup crafted to make a parser go quadratic costs
+  milliseconds, not minutes.
+- **No accidental overwrites.** Output is confined to the working directory, and
+  an existing file is left alone unless you pass `--force`.
+- **Bounded everywhere else.** Requests time out at 15s, bodies are capped at
+  5 MB, and crawls are bounded by `--max` pages and `--max-depth` levels. All
+  the limits are in `LIMITS` at the top of `scripts/lib.mjs`.
+
+Each of these has a regression test — see [Tests](#tests).
 
 The workflow in `SKILL.md`
 additionally requires a source backup, a staged (non-DNS) rebuild, proven

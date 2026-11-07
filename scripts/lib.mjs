@@ -1,8 +1,18 @@
 // Shared helpers for the site-migration scripts.
 // Dependency-free. Requires Node 18+ (built-in fetch). Tested on Node 22.
 //
-// Nothing here writes to disk, touches DNS, or mutates a remote site.
-// Every function is read-only over HTTP.
+// Nothing here writes to a remote site, touches DNS, or mutates anything.
+// Every network function is read-only over HTTP.
+//
+// Two classes of hostile input are assumed throughout, because both are
+// reachable by pointing an audit at a site you do not control:
+//
+//  1. URLs that arrive as *remote data* (sitemap <loc> entries, <a href>
+//     targets, Location headers, inventory files). None of these are trusted
+//     as fetch targets — see `remoteUrlAllowed`.
+//  2. HTML/XML crafted to make a parser backtrack. Nothing in the extract path
+//     uses an unbounded `[\s\S]*?` or an unbounded negated class followed by a
+//     literal; markup is walked with index scans instead. See `eachTag`.
 
 const DEFAULT_TIMEOUT = 15000;
 const USER_AGENT =
@@ -18,6 +28,11 @@ export const LIMITS = {
   maxRedirects: 5, // hops followed per request
   maxBytes: 5 * 1024 * 1024, // response body cap (5 MB); excess is discarded
   headScanBytes: 512 * 1024, // bytes of HTML scanned for <head> metadata
+  bodyScanBytes: 5 * 1024 * 1024, // bytes scanned for h1 / links / word count
+  maxTagBytes: 8 * 1024, // a "<" with no ">" inside this is not markup
+  maxFieldBytes: 4 * 1024, // cap on a single extracted field (title, loc, …)
+  h1WindowBytes: 8 * 1024, // bytes after <h1> searched for its text
+  maxAttrsPerTag: 64, // attributes parsed from one tag
   maxLinksPerPage: 2000, // links harvested from a single page
   maxPages: 5000, // ceiling on --max, whatever the caller passes
   maxDepth: 10, // BFS levels from the start URL
@@ -61,6 +76,76 @@ export function isInternalHost(hostname) {
 }
 
 /**
+ * Cloud instance-metadata endpoints. These hand out IAM credentials to anything
+ * that can issue a plain GET from inside the instance, so they are refused
+ * outright — not just when a redirect or a sitemap points at them, but even if
+ * someone passes one on the command line. No site audit ever needs them.
+ */
+const METADATA_HOSTS = new Set([
+  '169.254.169.254', // AWS / Azure / GCP / DigitalOcean / Oracle IMDS
+  '169.254.170.2', // AWS ECS task metadata
+  '100.100.100.200', // Alibaba Cloud
+  'fd00:ec2::254', // EC2 IMDS over IPv6
+  'metadata', // GCP short name
+  'metadata.google.internal',
+  'metadata.goog',
+]);
+
+/** True for a cloud instance-metadata address or hostname. */
+export function isMetadataHost(hostname) {
+  const h = String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
+  if (!h) return false;
+  return METADATA_HOSTS.has(h) || /(^|\.)metadata\.(google\.internal|goog)$/.test(h);
+}
+
+/**
+ * Gate for any URL that arrived as remote data — a sitemap `<loc>`, an `<a>`
+ * target, a path read out of an inventory file. Such a URL is attacker-chosen
+ * whenever the audited site is not yours, so it is checked against the origin
+ * that was given on the command line before it is ever fetched.
+ *
+ *  - must be http(s)
+ *  - must stay on the crawl origin (scheme + host + port), unless the caller
+ *    explicitly opts out (`sameOriginOnly: false`, for off-site link checking)
+ *  - must never be a cloud metadata endpoint
+ *  - if it is a private/loopback/link-local host, it must *be* the origin the
+ *    operator named. Auditing `http://localhost:8080` still works, because a
+ *    same-origin link there is the site itself — but remote content cannot
+ *    reach a different private host, or a sibling port on the same one, even
+ *    with `sameOriginOnly: false`.
+ */
+export function remoteUrlAllowed(url, origin, { sameOriginOnly = true } = {}) {
+  let u;
+  let o;
+  try {
+    u = new URL(String(url));
+    o = new URL(String(origin));
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  if (isMetadataHost(hostOf(u))) return false;
+  if (sameOriginOnly && u.origin !== o.origin) return false;
+  if (isInternalHost(hostOf(u)) && u.origin !== o.origin) return false;
+  return true;
+}
+
+/**
+ * Split remote-sourced URLs into the ones safe to fetch and the ones refused.
+ * Callers report `refused` rather than dropping it silently — a sitemap that
+ * points off-origin is a finding about the site, not noise.
+ */
+export function filterRemoteUrls(urls, origin, opts = {}) {
+  const allowed = [];
+  const refused = [];
+  for (const u of urls || []) {
+    if (remoteUrlAllowed(u, origin, opts)) allowed.push(u);
+    else refused.push(u);
+  }
+  return { allowed, refused };
+}
+
+/**
  * SSRF guard for redirects. A 3xx is followed only when it stays on the host you
  * pointed the script at — same host, or the www/apex twin of it, on the standard
  * port for its scheme. A redirect to any other host (an internal address, a
@@ -76,6 +161,7 @@ export function redirectAllowed(fromUrl, toUrl) {
     return false;
   }
   if (b.protocol !== 'http:' && b.protocol !== 'https:') return false;
+  if (isMetadataHost(hostOf(b))) return false;
   const ah = hostOf(a);
   const bh = hostOf(b);
   if (ah.replace(/^www\./, '') !== bh.replace(/^www\./, '')) return false;
@@ -121,6 +207,73 @@ export function toPathKey(url) {
   }
 }
 
+/**
+ * Resolve a path harvested from remote data onto an origin you chose, instead of
+ * concatenating the two strings. String concat trusts the path: `//evil.com/x`
+ * or `https://evil.com/x` pasted into an inventory file would silently retarget
+ * the request at another host. Returns null when the path does not land on
+ * `origin`.
+ */
+export function urlOnOrigin(origin, path) {
+  let o;
+  try {
+    o = new URL(String(origin));
+  } catch {
+    return null;
+  }
+  if (typeof path !== 'string' || /[\r\n\0]/.test(path)) return null;
+  let u;
+  try {
+    u = new URL(path, o.origin);
+  } catch {
+    return null;
+  }
+  if (u.origin !== o.origin) return null;
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  return u.toString();
+}
+
+/**
+ * Normalize a redirect-map source path. The output is pasted verbatim into a
+ * Caddyfile / nginx conf / `_redirects`, so anything carrying a newline, a NUL,
+ * or an off-origin host is dropped rather than emitted — a path harvested off a
+ * crawled site must not be able to inject a config directive.
+ */
+const REDIRECT_BASE = 'https://redirect-map.invalid';
+
+export function safeRedirectPath(path) {
+  if (typeof path !== 'string') return null;
+  const raw = path.trim();
+  if (!raw || /[\s\r\n\0{}]/.test(raw)) return null;
+  let u;
+  try {
+    u = new URL(raw, REDIRECT_BASE);
+  } catch {
+    return null;
+  }
+  if (u.origin !== REDIRECT_BASE) return null; // absolute or protocol-relative
+  return u.pathname + u.search;
+}
+
+/**
+ * Normalize a redirect-map target: either a path on the new site or an absolute
+ * http(s) URL. Same injection rules as the source side.
+ */
+export function safeRedirectTarget(target) {
+  if (typeof target !== 'string') return null;
+  const raw = target.trim();
+  if (!raw || /[\s\r\n\0{}]/.test(raw)) return null;
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const u = new URL(raw);
+      return u.toString();
+    } catch {
+      return null;
+    }
+  }
+  return safeRedirectPath(raw);
+}
+
 /** Read a response body, stopping hard at `maxBytes`. Returns decoded text. */
 async function readCapped(res, maxBytes) {
   if (!res.body) return { text: '', truncated: false };
@@ -148,6 +301,19 @@ async function readCapped(res, maxBytes) {
   return { text: Buffer.concat(chunks).toString('utf8'), truncated };
 }
 
+/** Last-resort check at the fetch boundary: a metadata endpoint is never fetched. */
+function fetchTargetRefusal(url) {
+  let u;
+  try {
+    u = new URL(String(url));
+  } catch {
+    return `not a URL: ${url}`;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return `refused non-http(s) URL: ${url}`;
+  if (isMetadataHost(hostOf(u))) return `refused cloud metadata host: ${u.hostname}`;
+  return null;
+}
+
 /**
  * Fetch with a hard timeout, a bounded number of same-host redirects and a
  * capped body. Never throws — errors are returned on the object.
@@ -160,9 +326,6 @@ export async function fetchText(
   url,
   { timeout = LIMITS.timeout, method = 'GET', maxBytes = LIMITS.maxBytes } = {},
 ) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeout);
-  const started = Date.now();
   const base = {
     url,
     finalUrl: url,
@@ -177,6 +340,12 @@ export async function fetchText(
     ms: 0,
     error: null,
   };
+  const refusal = fetchTargetRefusal(url);
+  if (refusal) return { ...base, error: refusal };
+
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeout);
+  const started = Date.now();
   let current = url;
   let hops = 0;
   try {
@@ -257,11 +426,6 @@ export async function fetchText(
   }
 }
 
-function firstMatch(re, html) {
-  const m = re.exec(html);
-  return m ? m[1].trim() : '';
-}
-
 function decodeEntities(s) {
   return s
     .replace(/&amp;/g, '&')
@@ -274,79 +438,284 @@ function decodeEntities(s) {
 }
 
 /**
- * Pull the SEO-relevant fields and links out of an HTML string.
+ * Walk the tags of a markup string using index scans only.
  *
- * The `<head>` patterns run against the first `headScanBytes` only. That is
- * where the metadata lives, and it keeps the two-part meta patterns (`[^>]+`
- * followed by `[^>]*`) off a multi-megabyte string, where a pathological tag
- * could make them backtrack quadratically.
+ * This is the whole anti-ReDoS story. A pattern like `<meta[^>]+name="x"` looks
+ * innocent and is quadratic: on `'<meta '` repeated, every one of the N start
+ * positions drags `[^>]+` across the rest of the string. Index scans cannot do
+ * that — `indexOf('<')` and `indexOf('>')` never revisit a character, so one
+ * pass is O(n) no matter how the input is shaped.
+ *
+ * A `<` with no `>` within `maxTagBytes` is not markup; the span is skipped
+ * rather than captured, and an unterminated final `<` simply ends the walk.
+ *
+ * Yields { raw, start, end }: the text between the angle brackets, and their
+ * indices in `html`.
  */
-export function extract(html, base, { headScanBytes = LIMITS.headScanBytes, maxLinks = LIMITS.maxLinksPerPage } = {}) {
-  if (!html) {
-    return { title: '', metaDescription: '', h1: '', canonical: '', wordCount: 0, links: [] };
-  }
-  const head = html.length > headScanBytes ? html.slice(0, headScanBytes) : html;
-  const title = decodeEntities(firstMatch(/<title[^>]*>([\s\S]*?)<\/title>/i, head));
-  const metaDescription = decodeEntities(
-    firstMatch(
-      /<meta[^>]+name=["']description["'][^>]*content=["']([\s\S]*?)["']/i,
-      head,
-    ) ||
-      firstMatch(
-        /<meta[^>]+content=["']([\s\S]*?)["'][^>]*name=["']description["']/i,
-        head,
-      ),
-  );
-  const h1 = decodeEntities(
-    firstMatch(/<h1[^>]*>([\s\S]*?)<\/h1>/i, html).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' '),
-  );
-  const canonical = firstMatch(
-    /<link[^>]+rel=["']canonical["'][^>]*href=["']([^"']+)["']/i,
-    head,
-  );
-
-  // crude but stable word count over visible body text
-  const body = html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ');
-  const wordCount = (decodeEntities(body).match(/\S+/g) || []).length;
-
-  const links = [];
-  const seen = new Set();
-  const hrefRe = /<a\b[^>]*\bhref=["']([^"']+)["']/gi;
-  let m;
-  while ((m = hrefRe.exec(html)) !== null) {
-    const abs = normalizeUrl(m[1], base);
-    if (abs && !seen.has(abs)) {
-      seen.add(abs);
-      links.push(abs);
-      if (links.length >= maxLinks) break;
+function* eachTag(html, { maxTagBytes = LIMITS.maxTagBytes, skipRawText = false } = {}) {
+  let i = 0;
+  while (i < html.length) {
+    const lt = html.indexOf('<', i);
+    if (lt < 0) return;
+    const gt = html.indexOf('>', lt + 1);
+    if (gt < 0) return;
+    const raw = gt - lt - 1 <= maxTagBytes ? html.slice(lt + 1, gt) : null;
+    if (raw !== null) yield { raw, start: lt, end: gt };
+    i = gt + 1;
+    // `<script>` and `<style>` bodies are CDATA, not markup: a `<h1>` or an
+    // `<a href>` inside one is a string literal, not an element.
+    if (skipRawText && raw !== null) {
+      const name = tagName(raw);
+      if (name === 'script' || name === 'style') {
+        const after = indexAfterClose(html, name, i);
+        if (after < 0) return; // unterminated block — nothing after it is markup
+        i = after;
+      }
     }
   }
-  return { title, metaDescription, h1, canonical, wordCount, links };
 }
 
-/** Parse a sitemap or sitemap-index XML into { sitemaps, urls }. */
-export function parseSitemap(xml) {
-  const locs = [];
-  const re = /<loc>\s*([\s\S]*?)\s*<\/loc>/gi;
+/** Tag name of a tag body ('meta charset="x"' -> 'meta', '/h1' -> '/h1'). */
+function tagName(raw) {
+  const m = /^\/?[a-zA-Z][a-zA-Z0-9:-]{0,30}/.exec(raw);
+  return m ? m[0].toLowerCase() : '';
+}
+
+// Runs only against one tag body, which `eachTag` has already bounded to
+// maxTagBytes, and every branch is a negated class anchored after the `=`.
+const ATTR_RE =
+  /([a-zA-Z_:][-a-zA-Z0-9_:.]{0,60})\s*=\s*(?:"([^"]{0,4096})"|'([^']{0,4096})'|([^\s"'>]{0,4096}))/g;
+
+/** Parse the attributes of a single (bounded) tag body into a plain object. */
+function tagAttrs(raw) {
+  const out = Object.create(null);
+  ATTR_RE.lastIndex = 0;
   let m;
-  while ((m = re.exec(xml)) !== null) locs.push(decodeEntities(m[1].trim()));
+  let n = 0;
+  while ((m = ATTR_RE.exec(raw)) !== null) {
+    const k = m[1].toLowerCase();
+    if (!(k in out)) out[k] = m[2] ?? m[3] ?? m[4] ?? '';
+    if (++n >= LIMITS.maxAttrsPerTag) break;
+  }
+  return out;
+}
+
+// Bounded close-tag patterns. The `[^>]{0,200}` tail cannot cross a `>`, so a
+// failed candidate costs at most ~200 characters, and each successful call
+// advances past its match — no span is scanned twice.
+const CLOSE_RE = {
+  script: /<\/script\b[^>]{0,200}>/gi,
+  style: /<\/style\b[^>]{0,200}>/gi,
+};
+
+function indexAfterClose(html, name, from) {
+  const re = CLOSE_RE[name];
+  re.lastIndex = from;
+  const m = re.exec(html);
+  return m ? m.index + m[0].length : -1;
+}
+
+function collapse(s) {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Visible text of a markup string: tags dropped, `<script>` and `<style>`
+ * bodies dropped with them. Index-scan based for the same reason as `eachTag`
+ * — `/<script[\s\S]*?<\/script>/g` and even `/<[^>]+>/g` go quadratic on a
+ * string full of unterminated `<`.
+ */
+function visibleText(html) {
+  const parts = [];
+  let i = 0;
+  while (i < html.length) {
+    const lt = html.indexOf('<', i);
+    if (lt < 0) {
+      parts.push(html.slice(i));
+      break;
+    }
+    if (lt > i) parts.push(html.slice(i, lt));
+    const gt = html.indexOf('>', lt + 1);
+    if (gt < 0) break; // unterminated tag — nothing after it is markup
+    const name = tagName(html.slice(lt + 1, lt + 12));
+    if (name === 'script' || name === 'style') {
+      const after = indexAfterClose(html, name, gt + 1);
+      if (after < 0) break; // unterminated block — drop the remainder
+      parts.push(' ');
+      i = after;
+      continue;
+    }
+    parts.push(' ');
+    i = gt + 1;
+  }
+  return parts.join('');
+}
+
+function field(s) {
+  return collapse(decodeEntities(String(s || '').slice(0, LIMITS.maxFieldBytes)));
+}
+
+/**
+ * Pull the SEO-relevant fields and links out of an HTML string.
+ *
+ * Bounded three ways:
+ *  - `<head>` fields (title, meta description, canonical) are read from the
+ *    first `headScanBytes` only; that is where metadata lives.
+ *  - h1, links and the word count are read from the first `bodyScanBytes`.
+ *  - every field is truncated to `maxFieldBytes`.
+ *
+ * All parsing is linear in the input length — see `eachTag`. Hostile shapes
+ * ('<script ' repeated to the body cap, unclosed '<title>' repeated, half a
+ * megabyte of `name="description" `) complete in milliseconds.
+ */
+export function extract(
+  html,
+  base,
+  {
+    headScanBytes = LIMITS.headScanBytes,
+    bodyScanBytes = LIMITS.bodyScanBytes,
+    maxLinks = LIMITS.maxLinksPerPage,
+  } = {},
+) {
+  const empty = { title: '', metaDescription: '', h1: '', canonical: '', wordCount: 0, links: [] };
+  if (!html || typeof html !== 'string') return empty;
+
+  const head = html.length > headScanBytes ? html.slice(0, headScanBytes) : html;
+  const body = html.length > bodyScanBytes ? html.slice(0, bodyScanBytes) : html;
+
+  // Sentinels, not truthiness: an empty `<title></title>` must count as "found"
+  // or every one of a million repeated `<title>` tags re-runs the slice below.
+  let title = null;
+  let metaDescription = '';
+  let canonical = '';
+  for (const tag of eachTag(head, { skipRawText: true })) {
+    const name = tagName(tag.raw);
+    if (name === 'title') {
+      if (title === null) {
+        const stop = head.indexOf('<', tag.end + 1);
+        title = field(head.slice(tag.end + 1, stop < 0 ? head.length : stop));
+      }
+      continue;
+    }
+    if (name === 'meta') {
+      if (metaDescription) continue;
+      const a = tagAttrs(tag.raw);
+      const n = (a.name || a.property || '').toLowerCase();
+      if (n === 'description' && a.content) metaDescription = field(a.content);
+      continue;
+    }
+    if (name === 'link') {
+      if (canonical) continue;
+      const a = tagAttrs(tag.raw);
+      if ((a.rel || '').toLowerCase().split(/\s+/).includes('canonical') && a.href) {
+        canonical = field(a.href);
+      }
+      continue;
+    }
+    // Metadata never appears after </head>; stop as soon as the body opens.
+    if (name === 'body') break;
+  }
+
+  let h1 = null;
+  const links = [];
+  const seen = new Set();
+  for (const tag of eachTag(body, { skipRawText: true })) {
+    const name = tagName(tag.raw);
+    if (name === 'h1') {
+      if (h1 === null) {
+        const win = body.slice(tag.end + 1, tag.end + 1 + LIMITS.h1WindowBytes);
+        const close = win.search(/<\/h1\b/i); // bounded string, safe to regex
+        h1 = field(visibleText(close < 0 ? win : win.slice(0, close)));
+      }
+      continue;
+    }
+    if (name === 'a' && links.length < maxLinks) {
+      const href = tagAttrs(tag.raw).href;
+      if (!href) continue;
+      const abs = normalizeUrl(decodeEntities(href), base);
+      if (abs && !seen.has(abs)) {
+        seen.add(abs);
+        links.push(abs);
+      }
+    }
+  }
+
+  const wordCount = (decodeEntities(visibleText(body)).match(/\S+/g) || []).length;
+  return { title: title || '', metaDescription, h1: h1 || '', canonical, wordCount, links };
+}
+
+/**
+ * Parse a sitemap or sitemap-index XML into { sitemaps, urls }.
+ *
+ * `<loc>` bodies are read with the same index scan as the HTML extractor. The
+ * old `/<loc>\s*([\s\S]*?)\s*<\/loc>/gi` is quadratic on a document full of
+ * unclosed `<loc>` tags.
+ *
+ * Returns raw, untrusted strings. Callers must put them through
+ * `remoteUrlAllowed` before fetching anything.
+ */
+export function parseSitemap(xml, { maxUrls = LIMITS.maxSitemapUrls } = {}) {
+  if (!xml || typeof xml !== 'string') return { sitemaps: [], urls: [] };
+  const locs = [];
+  for (const tag of eachTag(xml)) {
+    if (tagName(tag.raw) !== 'loc') continue;
+    const stop = xml.indexOf('<', tag.end + 1);
+    const text = xml.slice(tag.end + 1, stop < 0 ? xml.length : stop);
+    const loc = decodeEntities(text.slice(0, LIMITS.maxFieldBytes)).trim();
+    if (loc) locs.push(loc);
+    if (locs.length >= maxUrls) break;
+  }
   const isIndex = /<sitemapindex/i.test(xml);
   return isIndex ? { sitemaps: locs, urls: [] } : { sitemaps: [], urls: locs };
 }
 
 /**
  * Resolve all page URLs from a site's sitemap(s). Returns [] if none found.
+ *
+ * Everything a sitemap hands back is attacker-controlled when the audited site
+ * is not yours, so *both* kinds of entry are origin-restricted to the crawl
+ * origin before use: child sitemaps before they are queued, and page URLs
+ * before they are returned to a caller that will fetch them.
+ *
+ * Refused entries are reported through `log`, and pushed onto the `refused`
+ * array if the caller passes one — they are a finding about the site, not noise
+ * to swallow.
+ *
  * Bounded by LIMITS.maxSitemaps / LIMITS.maxSitemapUrls so a sitemap index that
  * loops or fans out endlessly cannot run away.
  */
-export async function getSitemapUrls(base, { timeout = LIMITS.timeout, log = () => {} } = {}) {
+export async function getSitemapUrls(
+  base,
+  { timeout = LIMITS.timeout, log = () => {}, refused = [] } = {},
+) {
   const origin = new URL(base).origin;
+  if (isMetadataHost(new URL(origin).hostname)) {
+    throw new Error(`refusing to crawl cloud metadata host ${new URL(origin).hostname}`);
+  }
   const queue = [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`];
   const tried = new Set();
   const urls = new Set();
+  const seenRefused = new Set();
+
+  const take = (sm, { sitemaps, urls: found }) => {
+    const child = filterRemoteUrls(sitemaps, origin);
+    const page = filterRemoteUrls(found, origin);
+    child.allowed.forEach((s) => queue.push(s));
+    page.allowed.forEach((u) => urls.add(u));
+    for (const r of [...child.refused, ...page.refused]) {
+      if (seenRefused.has(r)) continue;
+      seenRefused.add(r);
+      refused.push(r);
+    }
+    if (page.allowed.length || child.allowed.length) {
+      log(`  sitemap ${sm}: +${page.allowed.length} urls, +${child.allowed.length} child sitemaps`);
+    }
+    const dropped = child.refused.length + page.refused.length;
+    if (dropped) {
+      log(`  sitemap ${sm}: refused ${dropped} off-origin entr${dropped === 1 ? 'y' : 'ies'} (not fetched)`);
+    }
+  };
+
   while (queue.length) {
     if (tried.size >= LIMITS.maxSitemaps) {
       log(`  sitemap limit reached (${LIMITS.maxSitemaps} documents) — stopping`);
@@ -364,18 +733,12 @@ export async function getSitemapUrls(base, { timeout = LIMITS.timeout, log = () 
       // fetchText only returns text for html; sitemaps are xml, so re-fetch raw
       const raw = await fetchRaw(sm, { timeout });
       if (!raw) continue;
-      const { sitemaps, urls: found } = parseSitemap(raw);
-      // Only follow child sitemaps that stay on the origin we were pointed at.
-      sitemaps.filter((s) => sameOrigin(s, origin)).forEach((s) => queue.push(s));
-      found.forEach((u) => urls.add(u));
-      if (found.length || sitemaps.length) log(`  sitemap ${sm}: +${found.length} urls, +${sitemaps.length} child sitemaps`);
+      take(sm, parseSitemap(raw));
       continue;
     }
-    const { sitemaps, urls: found } = parseSitemap(res.text);
-    // Only follow child sitemaps that stay on the origin we were pointed at.
-    sitemaps.filter((s) => sameOrigin(s, origin)).forEach((s) => queue.push(s));
-    found.forEach((u) => urls.add(u));
+    take(sm, parseSitemap(res.text));
   }
+
   return [...urls];
 }
 
@@ -384,6 +747,7 @@ export async function getSitemapUrls(base, { timeout = LIMITS.timeout, log = () 
  * Same redirect and size guards as fetchText.
  */
 export async function fetchRaw(url, { timeout = LIMITS.timeout, maxBytes = LIMITS.maxBytes } = {}) {
+  if (fetchTargetRefusal(url)) return null;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeout);
   let current = url;
@@ -451,8 +815,10 @@ export async function pool(items, concurrency, worker) {
  * Returns the list of visited URLs.
  *
  * Bounded twice over: `max` pages (clamped to LIMITS.maxPages) and `maxDepth`
- * BFS levels. Only links on the same origin as the start URL are ever queued,
- * so an infinite calendar or a hostile link farm cannot run the crawl away.
+ * BFS levels. Links come out of fetched HTML, so every one goes through
+ * `remoteUrlAllowed` against the start origin before it is queued — an
+ * infinite calendar, a hostile link farm, or an `<a href>` pointing at an
+ * internal address cannot run the crawl away or off the site.
  */
 export async function crawl(
   base,
@@ -468,6 +834,8 @@ export async function crawl(
 ) {
   const start = normalizeUrl(base, base);
   if (!start) throw new Error(`crawl: ${base} is not an http(s) URL`);
+  const refusal = fetchTargetRefusal(start);
+  if (refusal) throw new Error(`crawl: ${refusal}`);
   const pageCap = Math.min(Math.max(1, Number(max) || 1), LIMITS.maxPages);
   if (pageCap < max) log(`  --max ${max} exceeds the ${LIMITS.maxPages}-page safety ceiling; using ${pageCap}`);
   const depthCap = Math.max(1, Number(maxDepth) || LIMITS.maxDepth);
@@ -488,7 +856,7 @@ export async function crawl(
       const extracted = res.text ? extract(res.text, url) : { links: [] };
       onPage({ url, result: res, extracted });
       for (const link of extracted.links || []) {
-        if (sameOrigin(link, start) && !visited.has(link)) nextSet.add(link);
+        if (!visited.has(link) && remoteUrlAllowed(link, start)) nextSet.add(link);
       }
       if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
     });
@@ -523,12 +891,41 @@ export function parseArgs(argv) {
   return out;
 }
 
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { mkdirSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
+import { dirname, resolve, relative, isAbsolute } from 'node:path';
 
-/** Write a file, creating parent dirs. */
-export function writeOut(path, content) {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, content);
-  return path;
+function assertInsideCwd(root, target, label) {
+  const rel = relative(root, target);
+  if (!rel || rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`refusing to write outside the working directory: ${label}`);
+  }
+  return rel;
+}
+
+/**
+ * Write a file, creating parent dirs. Two guards, because `--out` is a string
+ * off the command line and the filenames under it are derived from a crawled
+ * site:
+ *
+ *  - the resolved target must stay inside the current working directory, after
+ *    symlinks are resolved — no absolute path, no `../..` escape, no `--out`
+ *    pointing at a symlink into /etc
+ *  - an existing file is never clobbered; pass `{ force: true }` (the scripts
+ *    expose this as `--force`) to overwrite a previous run's output
+ */
+export function writeOut(path, content, { force = false } = {}) {
+  const root = realpathSync(process.cwd());
+  const target = resolve(root, String(path));
+  const rel = assertInsideCwd(root, target, String(path));
+  if (existsSync(target) && !force) {
+    throw new Error(
+      `refusing to overwrite ${rel} — move it aside, pick another --out, or pass --force`,
+    );
+  }
+  mkdirSync(dirname(target), { recursive: true });
+  // Re-check after mkdir: a pre-existing symlinked --out dir resolves only now.
+  const realDir = realpathSync(dirname(target));
+  assertInsideCwd(root, resolve(realDir, 'x'), String(path));
+  writeFileSync(target, content);
+  return rel;
 }
