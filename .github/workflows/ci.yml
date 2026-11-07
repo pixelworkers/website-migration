@@ -63,7 +63,8 @@ jobs:
       - name: Syntax check every script
         run: |
           for f in scripts/*.mjs tests/*.mjs; do node --check "$f"; done
-      # The SSRF, ReDoS, body-cap, origin-escape and output-path regressions.
+      # The SSRF, ReDoS, body-cap, origin-escape and output-path regressions,
+      # plus the SKILL.md scope assertions.
       # No network: the suite serves itself over loopback.
       - name: Audit-script regression suite
         run: node tests/node-smoke.mjs

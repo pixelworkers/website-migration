@@ -13,6 +13,10 @@ A [Claude Code](https://claude.com/claude-code) skill for migrating a website �
 to a new platform, a new framework, a new domain, or a new host — **without
 losing content, SEO, or uptime**.
 
+Any source and any target: WordPress, Squarespace, Wix, Webflow, Shopify, a
+hand-rolled PHP or Node app, or plain static files — into Next.js, a static
+generator, another CMS, or your own server.
+
 Maintained by [Pixelworkers](https://pixelworkers.org).
 
 Most migrations go wrong in one of three ways: pages silently vanish, old links
@@ -23,18 +27,35 @@ runs a phased, **verify-before-cutover** workflow on one principle:
 > The old site stays live and untouched until the new site is proven, URL for
 > URL, to be at least as good. DNS is the last step, never the first.
 
+## What it migrates
+
+| Source | Target | Path |
+|---|---|---|
+| Squarespace, Wix, Webflow, Shopify content | Next.js, Astro/Hugo/Eleventy, another CMS, your own server | A |
+| WordPress | Next.js, a static generator, another CMS | A |
+| WordPress | a new host, same stack | B |
+| Static HTML, Jekyll/Hugo, hand-rolled PHP | anywhere | A or B |
+| Laravel, Drupal, Joomla, custom PHP | a new server | B |
+| Node app | a new server | B |
+| Anything with no export at all | anywhere | A — the crawler is the migration |
+
+`SKILL.md` carries a per-source export recipe for each of these (step A3) and a
+per-stack data-layer recipe for each server move (step B5).
+
 ## Two paths
 
 | | **A. Platform / domain change** | **B. Host-to-host move** |
 |---|---|---|
 | **The job** | The site is rebuilt, re-platformed, or re-domained. | The same site moves to a new box. |
-| **Access needed** | HTTP only. | Shell + usually SSH to both hosts, DB credentials. |
+| **Access needed** | HTTP only (plus whatever export the source offers). | Shell + usually SSH to both hosts, DB credentials. |
 | **Tooling** | Read-only crawlers (`scripts/*.mjs`, Node 18+). | Dry-run-first shell helpers (`scripts/*.sh`, bash). |
 | **Gate** | `parity.mjs` reports zero problems. | `verify.sh` passes against the new host by IP. |
 
 They compose: a WordPress site moving to a new host *and* a new domain runs
 Path B for the move and Path A's inventory/parity/redirects as the pre-cutover
-gate.
+gate. A Squarespace site becoming a self-hosted Next.js build runs Path A for
+the content and the parity gate, and borrows Path B's provision/permissions/
+verify-by-IP steps for the new box.
 
 ## Install
 
@@ -84,15 +105,22 @@ chmod +x ~/.claude/skills/site-migration/scripts/*.sh
 ### Path A — a rebuild on a staging URL
 
 Migrating `https://oldsite.com` to a rebuild staged at
-`https://staging.newsite.com`:
+`https://staging.newsite.com`. The commands are the same whether the source is
+WordPress, Squarespace, Wix, Webflow, Shopify or hand-written HTML — only the
+content export in step 1b differs:
 
 ```bash
 # 1. Inventory the live source (read-only)
 node scripts/inventory.mjs https://oldsite.com --out out
 
+# 1b. Get the content out of the source platform. SKILL.md step A3 has the
+#     recipe per source (WXR, ?format=json, collection CSVs, Admin API, or the
+#     crawl when there is no export). Diff it against out/inventory.csv —
+#     anything in the inventory and not in the export is content you'd lose.
+
 # 2. Build the new site on its staging URL (your work).
 #    Put noindex + robots Disallow + basic auth on staging — and remember to
-#    take all three off at cutover. SKILL.md step A4 explains why.
+#    take all three off at cutover. SKILL.md step A5 explains why.
 
 # 3. Prove parity — this is the gate. Resolve every problem it reports.
 node scripts/parity.mjs https://oldsite.com https://staging.newsite.com \
@@ -115,7 +143,9 @@ can gate a CI pipeline or a cutover script.
 
 ### Path B — the same site on a new server
 
-Point Claude at the job in plain language:
+Works for WordPress, generic PHP (Laravel/Drupal/Joomla/custom), Node apps and
+static files; `preflight.sh` detects which. Point Claude at the job in plain
+language:
 
 > Migrate `oldsite.com` on `user@oldhost:/var/www/site` to `user@newhost`,
 > same domain. I have SSH to both and the DB credentials.
@@ -123,6 +153,11 @@ Point Claude at the job in plain language:
 Claude will run the pre-flight, back up, transfer, rewrite URLs if the domain is
 changing, fix permissions, verify against the new host by IP, and only then walk
 you through the DNS cutover — pausing for your confirmation at the gates.
+
+WordPress gets the scripted serialized-safe rewrite (`wp-search-replace.sh`).
+The other stacks get a step-by-step recipe instead — Laravel's cached config and
+storage symlink, Drupal's `trusted_host_patterns`, Joomla's absolute
+`$log_path`, a Node app's native modules and process manager.
 
 You can also run any script yourself; each prints `--help`:
 
@@ -221,7 +256,10 @@ each script will do (they print their plan) before running with `--go`.
   checksums.
 - **On a WordPress destination:** [`wp-cli`](https://wp-cli.org/) for the
   serialized-safe URL rewrite.
-- **On the database host:** `mysqldump` / `mysql`.
+- **On the database host:** `mysqldump` / `mysql` (the dump wrapper is
+  MySQL/MariaDB; for PostgreSQL use `pg_dump` yourself — `SKILL.md` B5c says
+  how).
+- **Optional:** `wget`, if you mirror a static source that has no shell access.
 
 ## Tests
 
@@ -246,7 +284,9 @@ Every case in it was a real finding first: SSRF through a sitemap index, SSRF
 through a redirect, quadratic blowup on malformed HTML, an unbounded response
 body, an origin escape from a concatenated URL, config injection via a redirect
 map, and a report written outside the working directory. It runs against
-loopback servers it starts itself, so it needs no network.
+loopback servers it starts itself, so it needs no network. It also asserts that
+`SKILL.md` still declares its full multi-platform scope and that every internal
+anchor in it resolves.
 
 Beyond those platforms, treat it as untested — read the script and run the
 preview first.

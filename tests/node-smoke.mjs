@@ -10,6 +10,11 @@
 //   * origin escape from string-concatenated URLs
 //   * output written outside the working directory
 //
+// Plus one non-security regression: the skill's declared scope. It is a general
+// site-migration skill, and it has been narrowed to WordPress-only by accident
+// once — so the frontmatter description, the "When to use this" list, and the
+// per-source recipes are asserted here rather than trusted.
+//
 // No network: everything runs against loopback servers started here, and the
 // loopback host policy is opened for exactly the port under test — which is
 // also what proves a *different* loopback port is still refused.
@@ -17,7 +22,7 @@
 // Run:  node tests/node-smoke.mjs
 
 import http from 'node:http';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -389,6 +394,91 @@ sec('writeOut confines output to the working directory and never clobbers');
 
 // ---------------------------------------------------------------------------
 // 6. redirects.mjs — untrusted paths never reach the generated config
+
+// --- the skill's declared scope -------------------------------------------
+// This skill is a general site-migration skill. The scope has been narrowed to
+// WordPress-only once by accident, which makes it stop matching the requests it
+// exists to handle, so the frontmatter is asserted rather than trusted.
+
+sec("SKILL.md frontmatter declares the general, multi-platform scope");
+{
+  const skill = readFileSync(join(ROOT, 'SKILL.md'), 'utf8');
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(skill);
+  assert(!!fm, 'SKILL.md has YAML frontmatter');
+  const desc = (/description:\s*>-\r?\n((?:[ \t]+.*\r?\n)+)/.exec(fm[1]) || [])[1] || '';
+  const oneLine = desc
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .join(' ');
+
+  assert(oneLine.length > 0, 'description is a folded block scalar we can read');
+  // The Agent Skills frontmatter limit. Over it, the skill may fail to load.
+  assert(oneLine.length <= 1024, `description is within 1024 chars (${oneLine.length})`);
+
+  for (const t of [
+    'WordPress',
+    'Squarespace',
+    'Wix',
+    'Webflow',
+    'Shopify',
+    'Vercel',
+    'Netlify',
+    'Next.js',
+    'PHP',
+    'Node app',
+    'static files',
+    'port this site to a new stack',
+    'self-host this site',
+    'migrate without losing SEO',
+  ]) {
+    assert(oneLine.includes(t), `description still names "${t}"`);
+  }
+
+  const when = /\n## When to use this\n([\s\S]*?)\n## /.exec(skill);
+  assert(!!when, 'SKILL.md still has a "When to use this" section');
+  const scope = when ? when[1] : '';
+  for (const t of ['Re-platforming', 'Re-hosting', 'Re-domaining', 'Next.js', 'Squarespace', 'Webflow']) {
+    assert(scope.includes(t), `"When to use this" still covers ${t}`);
+  }
+
+  // Non-WordPress sources must have real recipes, not a redirect to the WP section.
+  for (const h of [
+    '#### From Squarespace',
+    '#### From Wix',
+    '#### From Webflow',
+    '#### From Shopify',
+    '#### From a static or hand-rolled site',
+    '#### When there is no export at all',
+    '#### B5b. Static site',
+    '#### B5c. Generic PHP app (Laravel, Drupal, Joomla, custom)',
+    '#### B5d. Node app',
+  ]) {
+    assert(skill.includes(h), `SKILL.md has the "${h.replace(/^#+ /, '')}" recipe`);
+  }
+
+  // Every internal anchor link has to resolve, or the index table is a dead end.
+  const slug = (t) =>
+    t
+      .trim()
+      .toLowerCase()
+      .replace(/[^\w\s-]/gu, '')
+      .replace(/ /g, '-');
+  const headings = new Set();
+  let inFence = false;
+  for (const line of skill.split(/\r?\n/)) {
+    if (line.startsWith('```')) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const m = /^#{1,6}\s+(.*)$/.exec(line);
+    if (m) headings.add(slug(m[1]));
+  }
+  const dead = [...skill.matchAll(/\]\(#([^)]+)\)/g)].map((m) => m[1]).filter((a) => !headings.has(a));
+  assert(dead.length === 0, 'every internal anchor in SKILL.md resolves', dead.join(', '));
+}
+
 // ---------------------------------------------------------------------------
 sec('redirects.mjs rejects paths that would inject into a webserver config');
 {

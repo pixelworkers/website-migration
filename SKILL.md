@@ -1,18 +1,18 @@
 ---
 name: site-migration
 description: >-
-  Migrate a website without losing content, SEO, or uptime. Covers both shapes
-  of the job: moving a site to a new platform/framework/domain (crawl the old
-  site, prove URL-for-URL parity, generate the 301 map) and moving a site
-  host-to-host (back up, dump the database, rsync, serialized-safe URL rewrite,
-  fix permissions, verify by IP, cut DNS over with a rollback plan). Use when
-  the user wants to move, re-platform, re-host, or re-domain a site — triggers
-  include "migrate my site", "move off WordPress/Wix/Squarespace/Vercel",
-  "re-platform to Next.js", "self-host this site", "move to a new server",
-  "switch hosting", "cPanel to VPS", "transfer WordPress", "change the domain",
-  "migrate without losing SEO", or "cut over to the new site". Runs a phased,
-  verify-before-cutover workflow with read-only audit scripts and dry-run-first
-  shell helpers.
+  Migrate a website to a new platform, framework, domain, or host without
+  losing content, SEO, or uptime. Any source and any target — WordPress,
+  Squarespace, Wix, Webflow, Shopify, a hand-rolled PHP or Node app, or plain
+  static files — into Next.js, a static generator, another CMS, or your own
+  server. Export the old content, rebuild, prove URL-for-URL parity, generate
+  the 301 map; or back up, dump the database, rsync, rewrite URLs and cut DNS
+  over with a rollback plan. Use when the user wants to move, re-platform,
+  re-host or re-domain a site — triggers include "migrate my site", "move off
+  WordPress/Wix/Squarespace/Webflow/Shopify/Vercel/Netlify", "re-platform to
+  Next.js", "self-host this site", "port this site to a new stack", "move to a
+  new server", "switch hosting", "cPanel to VPS", "transfer WordPress", "change
+  the domain", "migrate without losing SEO", or "cut over to the new site".
 license: MIT
 ---
 
@@ -30,12 +30,25 @@ accident. It is built on one rule:
 > **The old site stays live and untouched until the new site has been proven,
 > URL for URL, to be at least as good. DNS is the last step, never the first.**
 
+## When to use this
+
+- **Re-platforming** — WordPress → Next.js, Squarespace/Wix/Webflow → static or
+  a framework, Shopify content → your own stack, one CMS → another, a
+  hand-rolled site → something maintainable.
+- **Re-hosting** — managed platform → your own server, or server → server
+  (cPanel → VPS, one VPS → another, on-prem → cloud).
+- **Re-domaining** — the same site answering on a new hostname.
+- Framework or major-version upgrades that change URLs or routing.
+- Consolidating several sites into one, or splitting one apart.
+- Any move where losing a URL, a page, or a search ranking would hurt.
+
 ## Two paths — pick one, or run both
 
 | | **A. Platform / domain change** | **B. Host-to-host move** |
 |---|---|---|
 | **The job** | The site is being rebuilt, re-platformed, or re-domained. | The same site moves to a new box. |
-| **Access needed** | HTTP only. | Shell + usually SSH to both hosts, DB credentials. |
+| **Typical shape** | Squarespace/Wix/Webflow/Shopify/WordPress → Next.js, a static generator, another CMS. Or the same stack on a new domain. | WordPress, PHP app, Node app or static files → a new server. |
+| **Access needed** | HTTP only (plus whatever export the source offers). | Shell + usually SSH to both hosts, DB credentials. |
 | **Tooling** | `scripts/*.mjs` — read-only crawlers (Node 18+). | `scripts/*.sh` — dry-run-first shell helpers (bash). |
 | **Gate** | `parity.mjs` reports zero problems. | `verify.sh` passes against the new host by IP. |
 | **Go to** | [Path A](#path-a--platform-or-domain-change) | [Path B](#path-b--host-to-host-move) |
@@ -48,6 +61,27 @@ read-only and it tells you what you are actually dealing with.
 If the user just wants a brand-new site with no predecessor, this is overkill —
 build it directly. This skill earns its weight only when there is an existing
 site whose value must be preserved.
+
+### Where the site is now — jump to the right recipe
+
+The phases are the same for every source. What differs is how you get the
+content out and what breaks on the way. Pick the row that matches:
+
+| Source | Path | Content comes out via | Recipe |
+|---|---|---|---|
+| WordPress → new host, same stack | B | `mysqldump` + `rsync` | [B — host-to-host](#path-b--host-to-host-move) (most common case, fully scripted) |
+| WordPress → Next.js / static / another CMS | A | WXR export + REST API + `wp-content/uploads` | [A3 · WordPress](#from-wordpress) |
+| Squarespace → anything | A | WXR export + `?format=json` + Commerce CSV | [A3 · Squarespace](#from-squarespace) |
+| Wix → anything | A | Blog export + CMS/Store CSVs + crawl | [A3 · Wix](#from-wix) |
+| Webflow → anything | A | Code export (ZIP) + per-collection CSV | [A3 · Webflow](#from-webflow) |
+| Shopify content/blog → anything | A | Admin API / `.atom` / `products.json` | [A3 · Shopify](#from-shopify) |
+| Static HTML, Jekyll/Hugo, hand-rolled | A or B | the files themselves | [A3 · static](#from-a-static-or-hand-rolled-site) |
+| PHP app (Laravel, Drupal, Joomla, custom) → new host | B | dump + `rsync` + config rewrite | [B5 · generic PHP](#b5c-generic-php-app-laravel-drupal-joomla-custom) |
+| Node app → new host | B | repo + build + process manager | [B5 · Node](#b5d-node-app) |
+| Anything else with no export | A | the crawler — `inventory.mjs` is always available | [A3 · no export](#when-there-is-no-export-at-all) |
+
+A re-platform that also changes host runs A for the content and the parity gate,
+and borrows B's steps for standing the new box up.
 
 ## Safety doctrine — read before doing anything
 
@@ -179,22 +213,312 @@ source of truth and the input to parity and redirect generation. Also inventory
 by hand what the crawler can't see: gated pages, forms, feeds, assets,
 third-party embeds.
 
-### A3. Plan the move
+### A3. Export the content from the source platform
+
+Two things come out of every source: the **content** (text, media, metadata,
+taxonomy) and the **URL set** (step A2 already has that). Get the content out
+before you build anything, so the rebuild is driven by real data rather than by
+what you can see on screen.
+
+Rules that apply to every source below:
+
+- **Never trust the platform's export to be complete.** Diff it against
+  `out/inventory.csv`. Every URL in the inventory must map to something in the
+  export, a planned rebuild-by-hand item, or a deliberate 301. Anything left
+  over is content you are about to lose.
+- **Media is almost never in the export** — the export references the old CDN.
+  Download every asset and re-host it, or the new site breaks the day the old
+  account lapses. The inventory's link data plus a crawl of `<img src>` /
+  `srcset` gives you the list.
+- **Carry the metadata, not just the prose.** Title, meta description, canonical,
+  Open Graph, structured data, publish date, author, categories/tags, and the
+  slug. Parity checks titles and H1s; search rankings care about the rest.
+- **Keep the old slugs where you can.** An identity URL needs no redirect, and
+  no redirect is always safer than a correct one.
+- **Export before you cancel anything.** Several platforms cut off export the
+  moment the plan lapses.
+
+#### From WordPress
+
+The richest source; three ways out, and you usually want two of them.
+
+```bash
+mkdir -p export
+
+# 1. Content as WXR (Tools -> Export -> All content), or over wp-cli:
+wp export --dir=./export --skip_comments=false        # on the source, or via --ssh
+
+# 2. The REST API — easier to script against than WXR, and paginated:
+curl -s 'https://oldsite.com/wp-json/wp/v2/posts?per_page=100&page=1&_embed' > export/posts-1.json
+curl -s 'https://oldsite.com/wp-json/wp/v2/pages?per_page=100&_embed'        > export/pages.json
+curl -s 'https://oldsite.com/wp-json/wp/v2/categories?per_page=100'          > export/categories.json
+curl -s 'https://oldsite.com/wp-json/wp/v2/media?per_page=100&page=1'        > export/media-1.json
+
+# 3. Media files — the uploads tree, straight off disk if you have shell:
+rsync -azh user@oldhost:/var/www/site/wp-content/uploads/ ./export/uploads/
+```
+
+`_embed` pulls the featured image, author and terms into the same response, which
+is what a static rebuild actually needs. Read `X-WP-TotalPages` from the response
+headers rather than guessing the page count.
+
+Things that live outside the posts table and get forgotten:
+
+- **SEO plugin metadata** (Yoast, Rank Math) is in `postmeta`, not in the post
+  body. With Yoast active the REST response carries `yoast_head_json`; otherwise
+  pull `_yoast_wpseo_title` / `_yoast_wpseo_metadesc` from the DB, or just take
+  the rendered `<title>` and meta description from `out/inventory.json` — which
+  is the ground truth anyway.
+- **Existing redirects.** If the Redirection plugin or Yoast's redirect manager
+  is in use, export its rules and merge them into your new redirect map. Dropping
+  them re-breaks links that were already fixed once.
+- **Forms** (Contact Form 7, Gravity, WPForms) have no equivalent on a static
+  target — pick the new endpoint in A4 and list the forms to rewire.
+- **Feeds**: `/feed/`, `/comments/feed/`, per-category feeds. Subscribers and
+  aggregators still hit them; serve them or 301 them.
+- **The sitemap path changes.** Core serves `/wp-sitemap.xml`, Yoast serves
+  `/sitemap_index.xml`. Whichever the old site used, keep answering on it.
+- **`?p=123` and `?page_id=`** short links are in the wild. A rule mapping post
+  ID → new path costs little.
+- **Comments.** WXR contains them. Decide explicitly: port to a hosted comment
+  system, render them as static HTML, or drop them and say so.
+
+If the destination is also WordPress, you are on [Path B](#path-b--host-to-host-move)
+instead — don't re-platform a site that is only changing boxes.
+
+#### From Squarespace
+
+Export is partial by design. Take all three sources and expect to rebuild the
+rest by hand.
+
+1. **The WXR export** — Settings → Import/Export → Export → WordPress. It gives
+   you one blog page's posts, basic pages, and text/image blocks.
+2. **Per-page JSON** — appending `?format=json-pretty` to any Squarespace URL
+   returns that page's underlying content as JSON, and `?format=main-content`
+   returns just the rendered content HTML. This is the reliable way to get the
+   pages the WXR skips. Drive it from the inventory:
+
+   ```bash
+   # Fetch the JSON behind every URL the inventory found.
+   mkdir -p export/json
+   node -e 'const {pages}=require("./out/inventory.json");for(const p of pages)if(p.status===200)console.log(p.url)' \
+   | while IFS= read -r u; do
+       out=export/json/$(printf '%s' "$u" | sed 's|[^A-Za-z0-9._-]|_|g').json
+       curl -fsS --max-time 30 "${u}?format=json-pretty" -o "$out" || echo "MISS $u"
+     done
+   ```
+
+   Review the `MISS` lines — those are pages that need a manual pass.
+3. **Commerce** — products export separately as CSV (Commerce → Inventory →
+   Export). Orders and customers export separately again, and they are not
+   content: if the store is moving, that is a commerce migration on top of this
+   one, with its own data and its own cutover.
+
+What the export does **not** carry, and must be rebuilt: more than one blog page,
+gallery/album/event/portfolio pages, index and cover pages, folders, form blocks,
+audio and video blocks, custom CSS, and every style and layout choice. Verify
+each of these against the inventory before you call the export complete.
+
+Media sits on `images.squarespace-cdn.com` / `static1.squarespace.com` and the
+export points at it. Download it: Squarespace image URLs take a `?format=2500w`
+(or `original`) suffix, so request the largest rendition rather than the
+thumbnail the page happened to use.
+
+URL shape to preserve: `/blog/<slug>`, `/<page-slug>`, collection items under
+their collection path. Squarespace serves a real `/sitemap.xml` — use it for the
+inventory rather than crawling.
+
+#### From Wix
+
+The hardest export, because there is no full-site export. Plan on a crawl-driven
+rebuild.
+
+- **Blog** — the Blog dashboard has a post export that produces a
+  WordPress-compatible XML. Check whether it is present on the account before you
+  promise it; if it is not, fall back to the crawl.
+- **CMS / Content Manager collections** — each collection exports to CSV from the
+  Content Manager. Do this per collection; there is no bulk export.
+- **Wix Stores** — products export to CSV from the Store dashboard.
+- **Pages** — no export. The content comes out of the crawl.
+
+Wix renders client-side, so `<a href>` crawling under-reports badly. Use the
+sitemaps instead — Wix publishes `/sitemap.xml` as an index with child sitemaps
+(typically `/pages-sitemap.xml`, `/blog-posts-sitemap.xml`,
+`/store-products-sitemap.xml`):
+
+```bash
+node scripts/inventory.mjs https://oldsite.com --out out     # follows the sitemap index
+```
+
+If a page's text still comes back empty, the content is injected by JS and you
+need a rendering fetch for that page — the audit scripts deliberately do not
+execute JavaScript. Render those pages with a headless browser and save the HTML
+into `export/` by hand, or copy them out of the editor.
+
+URL shape: blog posts live at `/post/<slug>`, store products at
+`/product-page/<slug>`. Wix also leaves `?lang=` and `#!`-era legacy URLs around
+— check the inventory for them and redirect rather than dropping them.
+
+Media is on `static.wixstatic.com`. There is no bulk download; collect the asset
+URLs from the crawl and fetch them.
+
+#### From Webflow
+
+The cleanest managed export, and the one trap is CMS content.
+
+1. **Code export** — Project settings → General → Export Code (needs a paid site
+   plan) gives a ZIP of static HTML, CSS, JS and assets for the designed pages.
+2. **CMS collections** — the code export does **not** include collection items or
+   collection-page content. Export each collection to CSV from the Collections
+   panel, and keep the `slug` column — it is your URL.
+3. **Rebuild the dynamic pages** from CSV + the collection page template in the
+   exported HTML.
+
+What breaks on export: Webflow-hosted forms (they post to Webflow and stop
+working the moment you leave — pick a new endpoint), Webflow Ecommerce, user
+accounts, and any Webflow-hosted search. Interactions/animations survive as the
+exported JS.
+
+URL shape: collection items live at `/<collection-slug>/<item-slug>`. Keep both
+segments and you need no redirects at all for the CMS half of the site.
+
+#### From Shopify
+
+Usually a *partial* migration: the blog and pages move, the store stays. Decide
+that explicitly before you touch anything, because moving checkout is a different
+project with money in it.
+
+Public read-only endpoints, no app or token needed:
+
+```bash
+mkdir -p export
+curl -s 'https://shop.example.com/blogs/news.atom'                 > export/blog-news.atom
+curl -s 'https://shop.example.com/products.json?limit=250&page=1'  > export/products-1.json
+curl -s 'https://shop.example.com/collections/all/products.json?limit=250' > export/collections-all.json
+curl -s 'https://shop.example.com/sitemap.xml'                     > export/sitemap.xml
+```
+
+Page the product endpoint until it returns an empty `products` array. If `page=`
+stops advancing on the store, switch to the Admin API and paginate with the
+`Link` header instead.
+
+For complete article bodies, authors and metafields, use the Admin API with a
+custom app's access token (`/admin/api/<version>/blogs.json`, then
+`/admin/api/<version>/blogs/<id>/articles.json`) — the `.atom` feed is capped and
+summarised. Products, customers and orders also export to CSV from the admin;
+blog articles do not.
+
+URL shape to preserve: `/products/<handle>`, `/collections/<handle>`,
+`/pages/<handle>`, `/blogs/<blog>/<article>`. Shopify also serves every product
+under `/collections/<c>/products/<handle>` — those duplicates are in the
+inventory and need redirects to the canonical path.
+
+If the store stays on Shopify, the split is the thing to get right: the new site
+answers for the content paths, and `/products/*`, `/collections/*`, `/cart`,
+`/checkout` and `/account` must keep resolving to Shopify. Write that split into
+the redirect map in A7 and test both halves before cutover.
+
+#### From a static or hand-rolled site
+
+Plain HTML, Jekyll, Hugo, an old PHP include-based site: the files *are* the
+export.
+
+```bash
+mkdir -p export
+rsync -azh user@oldhost:/var/www/site/ ./export/site/     # with shell access
+# or, without shell access, mirror what is published:
+wget --mirror --page-requisites --adjust-extension --no-parent https://oldsite.com/
+```
+
+Then grep for what is baked in rather than templated:
+
+```bash
+grep -rIl -e 'https://oldsite.com' -e 'http://oldsite.com' export/site/ | head -50
+```
+
+The live-URL inventory is still the authority — a file on disk that nothing links
+to and no URL serves is not content, and a URL served by a rewrite rule has no
+file at all. Reconcile the two lists before you decide what to rebuild.
+
+If it is moving to a new server unchanged, this is [Path B](#path-b--host-to-host-move),
+not a re-platform.
+
+#### When there is no export at all
+
+Some sources — a builder with the export removed, a locked CMS, an abandoned
+account with only front-end access — give you nothing. The crawl is the
+migration:
+
+```bash
+node scripts/inventory.mjs https://oldsite.com --crawl --max 2000 --out out
+```
+
+`out/inventory.json` already holds the title, meta description, H1, canonical and
+word count per URL. Fetch each page once more for its body, convert the main
+content region to Markdown or your target's format, and treat `inventory.csv` as
+the work list — one row, one page, checked off when rebuilt.
+
+This is also the honest fallback for *any* source whose export turns out to be
+incomplete. You always have the crawl.
+
+### A4. Plan the move
 
 - Map old URLs → new URLs. If the structure is identical, you want identity
   redirects (handled for you). If it changes, produce a `mapping.csv` of
   `old_path,new_path`.
-- Decide content migration method: export/import, scripted port, or manual.
+- **Settle the URL policy before you build**, not after. Three decisions cause
+  most post-migration damage, and all three are cheap now and expensive later:
+  - **Trailing slashes.** Pick one form and make the other 301 to it, once. If
+    the old site served `/about/` and the new one serves `/about`, every inbound
+    link takes a redirect, and a tool that generates both will chain them. In
+    Next.js this is `trailingSlash` in `next.config`; on S3/CloudFront and in
+    Caddy's `file_server` it is implicit — know which way yours goes.
+  - **Case.** A source on Windows/IIS was case-insensitive; a Linux target is
+    not. Check the inventory for mixed-case paths and lowercase-redirect them.
+  - **Index files.** `/dir/index.html` vs `/dir/` vs `/dir` — settle on one and
+    redirect the others.
+- Decide the content migration method per content type: export/import, scripted
+  port, or manual rebuild. The A3 export tells you which is realistic.
 - List integrations to re-wire (analytics IDs, form endpoints, payment keys,
   search, CDN) and schema/metadata to carry over.
+- List the URLs that are **not** pages and still have to answer: `robots.txt`,
+  `sitemap.xml` (at the old path), RSS/Atom feeds, `favicon.ico`, `/.well-known/*`,
+  verification files for Search Console and ad platforms, `ads.txt`, and any PDF
+  or image that earned links.
 - Define the parity bar: status match, title/H1 present, content not gutted.
 
-### A4. Rebuild on staging
+### A5. Rebuild on staging
 
 Build the new site on its temporary URL. Carry over content, templates,
 metadata (titles, descriptions, canonical, Open Graph), and structured data.
 Re-point integrations at test/staging credentials where possible. Nothing here
 touches the live site.
+
+**Target-stack notes.** The phases do not change with the target; these are the
+things that reliably get missed:
+
+- **Next.js / React framework.** Set `trailingSlash` to match A4's decision.
+  Port the redirect map into `next.config` `redirects()` (or the generated
+  `redirects.next.js` from A7) and remember those are *application* redirects —
+  a path your app never serves, like an old PDF, needs the rule at the
+  webserver/CDN instead. Generate `sitemap.xml` and `robots.txt` as routes, not
+  as forgotten static files. Carry per-page metadata through the metadata API
+  rather than a single layout default — a site where every page shares one title
+  passes "title present" and still loses rankings. If the old site had feeds,
+  add feed routes. Images: a local `/public` copy or a configured remote host,
+  but decide, because `next/image` will reject an unconfigured domain at runtime
+  and only on the pages that use it.
+- **Static generator (Astro, Hugo, Eleventy, Jekyll).** Slugs come from
+  filenames — confirm they reproduce the old paths exactly, including dated
+  prefixes like `/2019/04/post-name/`. Draft/future-dated content silently
+  disappears from a build; diff the built output's file list against the
+  inventory. Redirects are not a static-site feature: they live in the host's
+  config, so A7's output goes to Caddy/nginx/Netlify, not into the site.
+- **Another CMS.** Import first into a throwaway instance, check the slug and
+  taxonomy mapping, then import for real. Watch for the CMS rewriting slugs on
+  collision (`post-name-2`) — that is a silent URL change.
+- **Your own server.** You also want Path B's B3 (provision), B6 (permissions)
+  and B7 (verify by IP) — a re-platform that lands on a new box is both paths.
 
 **Keep the staging URL out of the index.** A staging copy that gets crawled
 competes with the live site for the same content and can outrank or cannibalise
@@ -212,10 +536,10 @@ Confirm it is working — `curl -sI https://staging.newsite.com | grep -i
 x-robots-tag` — and **write the removal into the cutover checklist**. These
 blocks are per-host, so if the rebuild is later promoted onto the production
 host, or the config is copied across, a live site ships with `noindex` and
-quietly disappears from search. Removing them at cutover is step A7's last
-checkbox and step A8's first verification.
+quietly disappears from search. Removing them at cutover is step A8's last
+checkbox and step A9's first verification.
 
-### A5. Verify parity (the gate)
+### A6. Verify parity (the gate)
 
 This is the step that separates a safe migration from a disaster.
 
@@ -241,7 +565,7 @@ If staging is behind basic auth, give the scripts the credentials in the URL
 (`https://user:pass@staging.newsite.com`) or lift the auth for the source IP
 while the sweep runs — do not remove it wholesale.
 
-### A6. Generate the redirect map
+### A7. Generate the redirect map
 
 ```bash
 # identity moves (same paths on the new host):
@@ -259,7 +583,7 @@ semicolons, `#`, `$`, backslashes, or anything that leaves the origin — are
 skipped and reported rather than emitted. If the count of skipped pairs is not
 zero, look at why before you ship the config.
 
-### A7. Pre-cutover checklist
+### A8. Pre-cutover checklist
 
 Do not proceed until all are true:
 
@@ -278,7 +602,7 @@ Do not proceed until all are true:
       file. A live site serving `X-Robots-Tag: noindex` drops out of search
       within days and the cause is not obvious from the page.
 
-### A8. Cutover
+### A9. Cutover
 
 **Stop and get explicit confirmation from the user before this step.** Then
 point DNS at the new host. Immediately verify the live domain:
@@ -295,7 +619,7 @@ node scripts/parity.mjs https://oldsite.com https://realdomain.com \
 
 (Compare against the old host by IP/temporary URL if DNS has already moved.)
 
-### A9. Post-cutover
+### A10. Post-cutover
 
 - Submit the new sitemap to Google Search Console; watch coverage + 404s for
   1–2 weeks. Use the URL Inspection tool on the homepage to confirm Google sees
@@ -312,6 +636,13 @@ node scripts/parity.mjs https://oldsite.com https://realdomain.com \
 
 ## Path B — host-to-host move
 
+The same site, a new box. Steps B1–B4 and B6–B9 are stack-agnostic — back up,
+provision, transfer, fix permissions, verify by IP, cut DNS, keep rollback
+ready. Only [B5](#b5-move-the-data-layer-and-rewrite-urls) branches by stack,
+and it covers WordPress, static, generic PHP (Laravel/Drupal/Joomla/custom) and
+Node. WordPress is the most common case and the only one with a scripted
+serialized-safe URL rewrite; the others are documented step by step.
+
 ### B0. Understand the migration
 
 Ask the user (or confirm from context) the things that change the plan:
@@ -327,10 +658,13 @@ Then run the inventory — do not guess:
 scripts/preflight.sh --path /var/www/site --ssh user@oldhost --url https://oldsite.com
 ```
 
-Read the report back to the user. It prints the detected stack, size, WordPress
-DB settings (never the password), runtime versions on the target, and a go/no-go
-checklist. Use it to size the work and spot problems early (missing wp-cli, an
-Apache `.htaccess` that needs an nginx translation, a huge uploads dir).
+Read the report back to the user. It prints the detected stack (`wordpress`,
+`node`, `php` or `static`), size, WordPress DB settings when relevant (never the
+password), runtime versions on the target, and a go/no-go checklist. Use it to
+size the work and spot problems early (missing wp-cli, an Apache `.htaccess`
+that needs an nginx translation, a huge uploads dir). The `STACK:` line tells
+you which [B5](#b5-move-the-data-layer-and-rewrite-urls) subsection you are
+following.
 
 ### B1. Lower DNS TTL (do this first, before anything else)
 
@@ -376,7 +710,7 @@ temporary hostname/IP first (see B6).
 If you expose the destination on a temporary public hostname while you work,
 give it the same treatment as a staging site: `X-Robots-Tag: noindex, nofollow`,
 a `Disallow: /` robots.txt, and basic auth — and remove all three at cutover.
-See A4 and the A7 checklist; the failure mode is identical.
+See A5 and the A8 checklist; the failure mode is identical.
 
 ### B4. Transfer the files
 
@@ -393,7 +727,18 @@ final pass right before cutover is quick.
 
 After it finishes, compare file counts between source and destination.
 
-### B5. Import the database and rewrite URLs
+### B5. Move the data layer and rewrite URLs
+
+What this step means depends on the stack. Find yours below. `preflight.sh`
+already told you which one it is (`STACK:` in its report — `wordpress`, `node`,
+`php` or `static`).
+
+The rule that spans all of them: **identify the storage format before you
+rewrite anything.** A blind `REPLACE()` over a column holding PHP-serialized
+data, JSON, or a base64 blob corrupts it, and the corruption shows up weeks
+later in one widget.
+
+#### B5a. WordPress (the common case)
 
 Import the dump on the destination (into the empty DB you created):
 
@@ -417,14 +762,106 @@ also pass `--yes` — so never add `--yes` to get past a prompt you haven't read
 Confirm the DB dump exists first.
 
 It skips post GUIDs (they must not change), covers custom plugin tables, and
-handles nested serialized objects. Run it only after the DB dump exists. For a
-non-WordPress site with URLs baked into a DB or config, identify the storage
-format first; only use a plain find/replace when you are certain nothing is
-serialized.
+handles nested serialized objects. Run it only after the DB dump exists.
 
-Then update `wp-config.php` DB credentials for the new host, and translate
-`.htaccess` rewrites to the destination webserver's config if the webserver
-changed (Apache → nginx).
+Then update `wp-config.php` DB credentials for the new host, keep the existing
+salts and keys (replacing them logs every user out), and translate `.htaccess`
+rewrites to the destination webserver's config if the webserver changed
+(Apache → nginx).
+
+#### B5b. Static site
+
+There is no data layer. The whole step is: find the absolute URLs that were
+baked in rather than templated, and fix them.
+
+```bash
+grep -rIl -e 'https://oldsite.com' -e 'http://oldsite.com' /var/www/site/ | head -50
+```
+
+Check HTML, CSS (`url()`), JS, JSON, and any sitemap or feed shipped as a file.
+Then confirm the webserver's rewrite rules came across — a static site is mostly
+its `try_files` / `file_server` config, and that lives outside the doc root.
+Translate `.htaccess` if the webserver changed.
+
+#### B5c. Generic PHP app (Laravel, Drupal, Joomla, custom)
+
+Dump and import the same way as WordPress — `db-dump.sh` is a `mysqldump`
+wrapper and works for any MySQL/MariaDB database. **For PostgreSQL it does not
+apply**: use `pg_dump -Fc` yourself, with the same discipline — credentials from
+`PGPASSWORD` in the environment or `~/.pgpass`, never on the command line, and
+check `pg_dump`'s own exit status rather than the compressor's.
+
+There is no `wp search-replace` equivalent, so handle URLs per framework:
+
+- **Laravel.** URLs normally come from `APP_URL` in `.env`, so the rewrite is one
+  config line, not a DB sweep. On the destination: copy `.env` and update
+  `APP_URL` + DB credentials, `composer install --no-dev --optimize-autoloader`,
+  then `php artisan config:clear && php artisan cache:clear && php artisan
+  view:clear` — a cached config file pins the *old* values and ignores your
+  edit, which is the single most common "I changed it and nothing happened" on a
+  Laravel move. Re-create the public storage symlink (`php artisan storage:link`
+  — it is a symlink, so it may not survive the transfer), make `storage/` and
+  `bootstrap/cache/` writable by the webserver user, re-install the scheduler
+  cron entry and any queue workers (supervisor/systemd units live outside the
+  doc root and will not be in the tar). Never `php artisan migrate` as part of a
+  host move — the schema already came over in the dump.
+- **Drupal.** `settings.php` holds the DB credentials; `$settings['trusted_host_patterns']`
+  holds the hostnames Drupal will answer for, and a new domain missing from it
+  returns a bare 400 that looks like a webserver fault. `sites/default/files`
+  must be writable, and `sites/default/settings.php` should go back to 444.
+  Rebuild caches after the move (`drush cr`). Drupal keeps serialized PHP in
+  config and block tables — rewrite URLs through `drush sql:query` with targeted
+  statements on known-text columns, not a global replace.
+- **Joomla.** `configuration.php` holds `$host`/`$db`/`$user`/`$password` *and*
+  `$log_path` / `$tmp_path` as absolute paths — if the doc root moved, those two
+  point at nothing and the site fails in ways that have nothing to do with the
+  database. Joomla stores component params as JSON; replace inside them with
+  care.
+- **Custom app.** Read its config file and find where the canonical hostname
+  lives. Then `grep -rIl` the codebase for the old origin, as in B5b, because a
+  hand-rolled app usually has a few hardcoded ones too.
+
+For a DB-stored URL with no framework helper, rewrite column by column on known
+text columns, after taking the backup:
+
+```sql
+-- Inspect first. Never run a global replace across every column.
+SELECT id, LEFT(body, 200) FROM articles WHERE body LIKE '%oldsite.com%' LIMIT 20;
+UPDATE articles SET body = REPLACE(body, 'https://oldsite.com', 'https://newsite.com')
+ WHERE body LIKE '%oldsite.com%';
+```
+
+Check for JSON and serialized columns first (`SHOW COLUMNS`, and eyeball the
+values) and leave those to a script that parses, edits and re-encodes them.
+
+#### B5d. Node app
+
+The data layer is whatever the app uses; the move is mostly runtime and process
+management, which the file transfer does not carry.
+
+- **Runtime version.** Match the source's major version from the pre-flight
+  report. A different major breaks native modules.
+- **Dependencies.** Do not rely on the transferred `node_modules` — native
+  modules are compiled for the source's architecture and libc. Transfer the
+  source plus the lockfile and run `npm ci --omit=dev` (or the project's
+  equivalent) on the destination, then the build.
+- **Environment.** `.env` or the process manager's env block holds the DB URL,
+  secrets and the public base URL. `.gitignore` excludes env files for good
+  reason, so they are not in the repo — copy them deliberately and update the
+  hostname.
+- **Process manager.** pm2 ecosystem files, systemd units and their enablement
+  live outside the doc root and are not in the backup tar. Re-create them,
+  confirm the service restarts on boot (`systemctl enable`, `pm2 save`), and
+  check the port matches what the new vhost proxies to.
+- **Reverse proxy.** The new vhost needs the proxy pass, plus the WebSocket
+  upgrade headers if the app uses them — a missing `Upgrade`/`Connection` pair
+  shows up as "the page loads but nothing is live".
+- **State on disk.** Uploads, a SQLite file, a session store, generated caches:
+  these are often outside the repo path you tarred. Find them in the config and
+  move them separately, with the right ownership.
+- **Databases.** MongoDB is `mongodump`/`mongorestore`; Postgres is `pg_dump`;
+  Redis is usually a cache you can let rebuild — but confirm it is not being
+  used as the session or queue store before you discard it.
 
 ### B6. Fix permissions
 
@@ -520,6 +957,13 @@ the response-body cap, origin escape from concatenated URLs, config injection
 through a redirect map, and output written outside the working directory. It
 uses loopback servers, so it needs no network.
 
+It also asserts this file's declared scope — that the frontmatter description
+fits the 1024-character limit and still names every platform the skill covers,
+that "When to use this" still lists re-platforming/re-hosting/re-domaining, that
+each non-WordPress source and stack still has its own recipe, and that every
+internal anchor resolves. The scope was narrowed to WordPress-only by accident
+once; the test is there so it cannot happen quietly again.
+
 Run both after changing any script.
 
 ## Edge cases to watch
@@ -532,6 +976,25 @@ Run both after changing any script.
   the old host.
 - **CDN / caching layers** (Cloudflare, Varnish) that need purging post-cutover.
 - **`wp-config.php` salts and keys** — keep them, or all users get logged out.
+  The same applies to any app's session secret (`APP_KEY`, `SECRET_KEY_BASE`,
+  `NEXTAUTH_SECRET`): change it and every signed-in user is signed out.
+- **Trailing-slash and case mismatches** between the old and new routing. The
+  commonest cause of a migration that looks fine and bleeds traffic — see A4.
+- **A managed-platform export that was incomplete.** Squarespace skips most page
+  types, Webflow's code export skips CMS items, Wix has no page export at all.
+  Diff the export against `out/inventory.csv` rather than trusting it.
+- **Assets still served from the old platform's CDN** (`static.wixstatic.com`,
+  `images.squarespace-cdn.com`, `cdn.shopify.com`). The new site works right up
+  until the old account lapses. Re-host every asset.
+- **A JS-rendered source**, where the crawler sees an empty page. The audit
+  scripts do not execute JavaScript, by design. Use the sitemap for the URL set
+  and render those specific pages another way for the content.
+- **Symlinks that did not survive the transfer** — Laravel's `public/storage`,
+  a shared uploads mount, a `current` release link.
+- **Cached framework config pinning old values** (`php artisan config:cache`, an
+  opcache, a build-time env inline). Clear it and re-verify, don't assume.
+- **Process managers, cron entries and systemd units live outside the doc root**
+  and are not in the backup tar. Re-create them on the destination.
 - **Mixed content** after an http→https move — the search-replace handles the DB;
   check hardcoded `http://` refs too.
 - **Larger-than-RAM DB dumps** — `db-dump.sh` uses `--quick` to stream rather
