@@ -57,6 +57,9 @@ function page(res, ex) {
   return {
     status: res.status,
     finalUrl: res.finalUrl,
+    // Set when the page 3xx'd to a different host; that redirect is reported,
+    // not followed, so there is no content to compare.
+    blockedRedirect: res.blockedRedirect || null,
     title: ex.title || '',
     h1: ex.h1 || '',
     canonical: ex.canonical || '',
@@ -80,7 +83,9 @@ async function main() {
     if (newP.status >= 400 || newP.status === 0) issues.push(`MISSING on new (status ${newP.status || 'error'})`);
     else if (oldP.status < 400 && newP.status !== oldP.status && !(oldP.status < 400 && newP.status < 400))
       issues.push(`status ${oldP.status} → ${newP.status}`);
-    if (oldP.status < 400 && newP.status < 400) {
+    if (newP.blockedRedirect) issues.push(`new redirects off-host → ${newP.blockedRedirect}`);
+    if (oldP.blockedRedirect) issues.push(`old redirects off-host → ${oldP.blockedRedirect}`);
+    if (oldP.status < 300 && newP.status < 300) {
       if (oldP.title && newP.title && oldP.title !== newP.title) issues.push('title changed');
       if (oldP.title && !newP.title) issues.push('title missing on new');
       if (

@@ -25,14 +25,26 @@ cp -r claude-site-migration .claude/skills/site-migration
 cp -r claude-site-migration ~/.claude/skills/site-migration
 ```
 
-Then just describe the migration to Claude Code — e.g. *"migrate my Squarespace
-site to self-hosted Next.js without losing SEO"* — and the skill activates.
+Then just describe the migration to Claude Code — e.g. *"move my WordPress site
+to a new host"* or *"migrate my Squarespace site to self-hosted Next.js without
+losing SEO"* — and the skill activates.
+
+## Moving a WordPress site to a new host
+
+That is the common case, and it has its own step-by-step recipe in `SKILL.md`:
+[WordPress → WordPress](./SKILL.md#wordpress--wordpress-moving-one-site-to-a-new-host).
+Pre-flight inventory, back up the source first, `rsync` the files, `mysqldump`
+the database, then the step everyone gets wrong — rewriting URLs with
+`wp search-replace --precise --recurse-objects`, never a SQL `REPLACE()`, which
+corrupts WordPress's serialized PHP and empties theme options and page-builder
+layouts. Then verify on staging, issue SSL on the new host, and only then move
+DNS, with the old host left running as the rollback.
 
 ## What's in the box
 
 | File | Purpose |
 | --- | --- |
-| `SKILL.md` | The workflow and safety doctrine Claude follows. |
+| `SKILL.md` | The workflow, the WordPress host-to-host recipe, and the safety doctrine Claude follows. |
 | `scripts/inventory.mjs` | Crawl the source site → complete URL inventory (JSON + CSV). |
 | `scripts/parity.mjs` | Compare old vs new URL-by-URL; the cutover gate. |
 | `scripts/redirects.mjs` | Generate 301 redirect configs (Caddy / nginx / Netlify / Next.js). |
@@ -44,6 +56,9 @@ site to self-hosted Next.js without losing SEO"* — and the skill activates.
 - Node.js 18 or newer (uses built-in `fetch`). Tested on Node 22.
 - No npm install. No dependencies. The scripts only issue HTTP `GET`/`HEAD`
   requests and write report files — they never mutate a target site.
+- **The scripts are read-only and crawl only the origin you point them at:** a
+  redirect to a different host is reported, not followed, and every request is
+  bounded by a timeout, a response-size cap, and page/depth limits.
 
 ## Worked example
 
@@ -77,7 +92,15 @@ can gate a CI pipeline or a cutover script.
 
 ## Safety
 
-The scripts are read-only over HTTP by design. The workflow in `SKILL.md`
+The scripts are read-only over HTTP by design — `GET`/`HEAD` only, no shell-out,
+no `eval`, no credentials, and no filesystem access outside the `--out`
+directory. They stay on the origin you give them: an off-host redirect is
+reported rather than followed, so a crawl cannot be bounced to an internal
+address or a third-party site. Requests time out at 15s, bodies are capped at
+5 MB, and crawls are bounded by `--max` pages and `--max-depth` levels. All the
+limits are in `LIMITS` at the top of `scripts/lib.mjs`.
+
+The workflow in `SKILL.md`
 additionally requires a source backup, a staged (non-DNS) rebuild, proven
 parity, a loaded redirect map, a low DNS TTL, a running old host through the
 monitoring window, and explicit human confirmation before any irreversible step

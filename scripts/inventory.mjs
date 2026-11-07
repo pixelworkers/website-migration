@@ -2,11 +2,12 @@
 // inventory.mjs — build a complete, read-only inventory of a live site.
 //
 // Usage:
-//   node scripts/inventory.mjs <baseUrl> [--out out] [--max 500] [--concurrency 6] [--crawl]
+//   node scripts/inventory.mjs <baseUrl> [--out out] [--max 500] [--max-depth 10] [--concurrency 6] [--crawl]
 //
 //   <baseUrl>        e.g. https://oldsite.com
 //   --out <dir>      output directory (default: ./out)
-//   --max <n>        max pages to inventory (default: 500)
+//   --max <n>        max pages to inventory (default: 500, hard ceiling 5000)
+//   --max-depth <n>  max link depth when crawling (default: 10)
 //   --concurrency    parallel requests (default: 6)
 //   --crawl          force a link crawl even if a sitemap exists
 //   --delay <ms>     politeness delay between requests (default: 0)
@@ -22,11 +23,12 @@ import { parseArgs, getSitemapUrls, crawl, fetchText, extract, pool, writeOut, t
 const args = parseArgs(process.argv.slice(2));
 const base = args._[0];
 if (!base) {
-  console.error('Usage: node scripts/inventory.mjs <baseUrl> [--out out] [--max 500] [--crawl]');
+  console.error('Usage: node scripts/inventory.mjs <baseUrl> [--out out] [--max 500] [--max-depth 10] [--crawl]');
   process.exit(1);
 }
 const outDir = args.out || 'out';
 const max = Number(args.max || 500);
+const maxDepth = Number(args['max-depth'] || 10);
 const concurrency = Number(args.concurrency || 6);
 const delayMs = Number(args.delay || 0);
 
@@ -51,6 +53,7 @@ async function main() {
     console.log('No sitemap (or --crawl set). Crawling links…');
     await crawl(base, {
       max,
+      maxDepth,
       concurrency,
       delayMs,
       log: (m) => console.log(m),
