@@ -13,6 +13,8 @@
 //   --out <dir>           output dir (default: ./out)
 //   --concurrency <n>     default 6
 //   --word-drop <pct>     flag pages whose word count fell by more than pct (default 40)
+//   --allow-host <h>      permit a private/loopback host (e.g. 127.0.0.1:3000)
+//   --force               overwrite existing files in <out>
 //
 // If --inventory is omitted, the old site's sitemap is used to derive paths.
 //
@@ -21,9 +23,26 @@
 //   <out>/parity-report.md    human-readable, problems first
 //
 // Read-only over HTTP against both sites.
+//
+// Paths come from a file the operator was handed (inventory.json) or from the
+// old site's sitemap — i.e. from data the audited site controls. They are
+// resolved with urlOnOrigin(), which asserts the result is still on the origin
+// we meant, instead of being concatenated onto it: "https://oldsite.com" +
+// "@evil.example.com/x" is a URL whose host is evil.example.com.
 
 import { readFileSync } from 'node:fs';
-import { parseArgs, getSitemapUrls, fetchText, extract, pool, writeOut, toPathKey } from './lib.mjs';
+import {
+  parseArgs,
+  getSitemapUrls,
+  fetchText,
+  extract,
+  pool,
+  writeOut,
+  toPathKey,
+  urlOnOrigin,
+  applyCommonArgs,
+  assertFetchable,
+} from './lib.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 const oldBase = args._[0];
@@ -32,6 +51,7 @@ if (!oldBase || !newBase) {
   console.error('Usage: node scripts/parity.mjs <oldBase> <newBase> [--inventory out/inventory.json] [--out out]');
   process.exit(1);
 }
+const { force } = applyCommonArgs(args, { log: (m) => console.log(m) });
 const outDir = args.out || 'out';
 const concurrency = Number(args.concurrency || 6);
 const wordDropPct = Number(args['word-drop'] || 40);
@@ -66,12 +86,28 @@ function page(res, ex) {
 }
 
 async function main() {
-  const list = await paths();
+  await Promise.all([assertFetchable(oldBase), assertFetchable(newBase)]);
+  const all = await paths();
+  const list = [];
+  const rejected = [];
+  for (const p of all) {
+    try {
+      urlOnOrigin(oldOrigin, p);
+      urlOnOrigin(newOrigin, p);
+      list.push(p);
+    } catch (e) {
+      rejected.push({ path: p, why: String(e.message || e) });
+    }
+  }
+  if (rejected.length) {
+    console.warn(`Skipped ${rejected.length} path(s) that do not stay on the target origin:`);
+    for (const r of rejected.slice(0, 10)) console.warn(`  ${JSON.stringify(r.path)} — ${r.why}`);
+  }
   console.log(`Comparing ${list.length} paths: ${oldOrigin} → ${newOrigin}`);
 
   const rows = await pool(list, concurrency, async (path) => {
-    const oldUrl = oldOrigin + path;
-    const newUrl = newOrigin + path;
+    const oldUrl = urlOnOrigin(oldOrigin, path);
+    const newUrl = urlOnOrigin(newOrigin, path);
     const [o, n] = await Promise.all([fetchText(oldUrl), fetchText(newUrl)]);
     const oldP = page(o, o.text ? extract(o.text, oldUrl) : {});
     const newP = page(n, n.text ? extract(n.text, newUrl) : {});
@@ -101,12 +137,13 @@ async function main() {
     newBase,
     generatedAt: new Date().toISOString(),
     total: rows.length,
+    skippedPaths: rejected.length,
     passing: rows.length - problems.length,
     problems: problems.length,
     missing: rows.filter((r) => r.new.status >= 400 || r.new.status === 0).length,
   };
 
-  writeOut(`${outDir}/parity-report.json`, JSON.stringify({ summary, rows }, null, 2));
+  writeOut(`${outDir}/parity-report.json`, JSON.stringify({ summary, rows, rejected }, null, 2), { force });
 
   const md = [];
   md.push(`# Parity report`);
@@ -114,6 +151,9 @@ async function main() {
   md.push(`- Old: \`${oldBase}\``);
   md.push(`- New: \`${newBase}\``);
   md.push(`- Generated: ${summary.generatedAt}`);
+  if (rejected.length) {
+    md.push(`- Skipped ${rejected.length} path(s) that would have left the target origin.`);
+  }
   md.push('');
   md.push(`**${summary.passing}/${summary.total} paths pass.** ${summary.problems} with issues, ${summary.missing} missing on the new site.`);
   md.push('');
@@ -133,7 +173,7 @@ async function main() {
     md.push('Every inventoried path resolves on the new site with equivalent content. Safe to proceed to redirect-map review and cutover checks.');
   }
   md.push('');
-  writeOut(`${outDir}/parity-report.md`, md.join('\n'));
+  writeOut(`${outDir}/parity-report.md`, md.join('\n'), { force });
 
   console.log('');
   console.log(`${summary.passing}/${summary.total} pass. ${summary.problems} problems, ${summary.missing} missing.`);
@@ -142,6 +182,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e);
+  console.error(String(e.message || e));
   process.exit(1);
 });

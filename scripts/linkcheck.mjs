@@ -12,14 +12,18 @@
 //   --concurrency <n>  default 8
 //   --external         also check off-site links (slower; default: internal only)
 //   --out <dir>        output dir (default ./out)
+//   --allow-host <h>   permit a private/loopback host (e.g. 127.0.0.1:3000)
+//   --force            overwrite existing files in <out>
 //
 // Writes:
 //   <out>/link-report.json
 //   <out>/link-report.md
 //
-// Read-only over HTTP.
+// Read-only over HTTP. Links pointing at private, loopback, link-local or
+// cloud-metadata hosts are reported as refused rather than fetched — with
+// --external that matters, because the link targets come from the page.
 
-import { parseArgs, crawl, fetchText, pool, writeOut, sameOrigin } from './lib.mjs';
+import { parseArgs, crawl, fetchText, pool, writeOut, sameOrigin, applyCommonArgs, assertFetchable } from './lib.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 const base = args._[0];
@@ -27,6 +31,7 @@ if (!base) {
   console.error('Usage: node scripts/linkcheck.mjs <baseUrl> [--max 500] [--external]');
   process.exit(1);
 }
+const { force } = applyCommonArgs(args, { log: (m) => console.log(m) });
 const outDir = args.out || 'out';
 const max = Number(args.max || 500);
 const concurrency = Number(args.concurrency || 8);
@@ -36,6 +41,7 @@ const checkExternal = !!args.external;
 const refs = new Map();
 
 async function main() {
+  await assertFetchable(base);
   console.log(`Crawling ${base} (max ${max} pages)…`);
   const visited = await crawl(base, {
     max,
@@ -80,7 +86,7 @@ async function main() {
     brokenInternal: broken.filter((b) => b.internal).length,
   };
 
-  writeOut(`${outDir}/link-report.json`, JSON.stringify({ summary, broken }, null, 2));
+  writeOut(`${outDir}/link-report.json`, JSON.stringify({ summary, broken }, null, 2), { force });
 
   const md = [];
   md.push('# Link report');
@@ -102,7 +108,7 @@ async function main() {
     md.push('## No broken links found.');
   }
   md.push('');
-  writeOut(`${outDir}/link-report.md`, md.join('\n'));
+  writeOut(`${outDir}/link-report.md`, md.join('\n'), { force });
 
   console.log('');
   console.log(`${broken.length} broken (${summary.brokenInternal} internal) of ${checked.length} links.`);
@@ -111,6 +117,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e);
+  console.error(String(e.message || e));
   process.exit(1);
 });

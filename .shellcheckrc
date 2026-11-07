@@ -1,0 +1,10 @@
+# Match what CI enforces: shellcheck -x (all severities, including style).
+#
+# SC2016 ("expressions don't expand in single quotes") is deliberate throughout.
+# The remote/local runners in scripts/lib/common.sh take a *literal* shell
+# snippet whose "$1"/"$2" are filled in from arguments — that is precisely how
+# user values are kept out of the command text. Expanding them would reintroduce
+# the injection this design removes.
+disable=SC2016
+# SC1091: shellcheck -x follows scripts/lib/common.sh; the info is noise anyway.
+disable=SC1091

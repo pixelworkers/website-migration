@@ -1,3 +1,22 @@
+# Never commit secrets or migration artifacts.
+.env
+.env.*
+*.env
+credentials*
+secrets*
+wp-config.php
+
+# Database dumps — these contain the whole site, users included.
+*.sql
+*.sql.gz
+
+# Backups and transferred payloads produced by the scripts.
+backups/
+*.tar
+*.tar.gz
+*.sha256
+paths.txt
+
 # Script output / reports
 out/
 out-*/
@@ -13,10 +32,15 @@ Caddyfile.redirects
 redirects.nginx.conf
 redirects.next.js
 
+# User-supplied migration inputs
+mapping.csv
+
 # Node
 node_modules/
 npm-debug.log*
-.DS_Store
 
-# User-supplied migration inputs
-mapping.csv
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~

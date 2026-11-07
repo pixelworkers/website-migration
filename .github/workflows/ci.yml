@@ -1,0 +1,85 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versions
+        run: shellcheck --version
+      - name: Lint every shell script
+        run: shellcheck -x -s bash scripts/*.sh scripts/lib/common.sh tests/smoke.sh
+
+  smoke:
+    name: smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versions
+        run: |
+          /bin/bash --version | head -1
+          uname -a
+          command -v sha256sum || command -v shasum
+      # macOS ships bash 3.2, which is the oldest bash these scripts claim to
+      # support — running the suite there is what backs that claim.
+      - name: Smoke tests
+        run: /bin/bash tests/smoke.sh
+
+  node:
+    name: node ${{ matrix.node }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ["18", "20", "22"]
+        exclude:
+          # One macOS run is enough to catch platform differences.
+          - os: macos-latest
+            node: "18"
+          - os: macos-latest
+            node: "20"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Versions
+        run: node --version
+      - name: Syntax check every script
+        run: |
+          for f in scripts/*.mjs tests/*.mjs; do node --check "$f"; done
+      # The SSRF, ReDoS, body-cap, origin-escape and output-path regressions.
+      # No network: the suite serves itself over loopback.
+      - name: Audit-script regression suite
+        run: node tests/node-smoke.mjs
+
+  executable-bits:
+    name: executable bits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Entrypoints must be committed 100755, the sourced lib 100644
+        run: |
+          fail=0
+          for f in $(git ls-files 'scripts/*.sh' | grep -v '^scripts/lib/'); do
+            m="$(git ls-files -s "$f" | cut -d' ' -f1)"
+            if [ "$m" != 100755 ]; then echo "::error file=$f::mode $m, expected 100755"; fail=1; fi
+          done
+          m="$(git ls-files -s scripts/lib/common.sh | cut -d' ' -f1)"
+          if [ "$m" != 100644 ]; then echo "::error file=scripts/lib/common.sh::mode $m, expected 100644"; fail=1; fi
+          exit $fail

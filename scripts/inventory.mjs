@@ -10,14 +10,29 @@
 //   --concurrency    parallel requests (default: 6)
 //   --crawl          force a link crawl even if a sitemap exists
 //   --delay <ms>     politeness delay between requests (default: 0)
+//   --allow-host <h> permit a private/loopback host (e.g. 127.0.0.1:3000)
+//   --force          overwrite existing files in <out>
 //
 // Writes:
 //   <out>/inventory.json   full per-URL records
 //   <out>/inventory.csv    spreadsheet-friendly summary
 //
 // This script only issues GET requests. It never writes to the target site.
+// Private, loopback, link-local and cloud-metadata hosts are refused unless you
+// name them with --allow-host; see scripts/guard.mjs.
 
-import { parseArgs, getSitemapUrls, crawl, fetchText, extract, pool, writeOut, toPathKey } from './lib.mjs';
+import {
+  parseArgs,
+  getSitemapUrls,
+  crawl,
+  fetchText,
+  extract,
+  pool,
+  writeOut,
+  toPathKey,
+  applyCommonArgs,
+  assertFetchable,
+} from './lib.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 const base = args._[0];
@@ -25,6 +40,7 @@ if (!base) {
   console.error('Usage: node scripts/inventory.mjs <baseUrl> [--out out] [--max 500] [--crawl]');
   process.exit(1);
 }
+const { force } = applyCommonArgs(args, { log: (m) => console.log(m) });
 const outDir = args.out || 'out';
 const max = Number(args.max || 500);
 const concurrency = Number(args.concurrency || 6);
@@ -38,6 +54,7 @@ function csvCell(v) {
 const records = [];
 
 async function main() {
+  await assertFetchable(base);
   console.log(`Inventorying ${base}`);
   let urls = [];
 
@@ -80,7 +97,7 @@ async function main() {
     errors: records.filter((r) => r.error).length,
   };
 
-  writeOut(`${outDir}/inventory.json`, JSON.stringify({ summary, pages: records }, null, 2));
+  writeOut(`${outDir}/inventory.json`, JSON.stringify({ summary, pages: records }, null, 2), { force });
 
   const header = ['url', 'path', 'status', 'redirectedTo', 'title', 'metaDescription', 'h1', 'canonical', 'wordCount', 'ms', 'error'];
   const csv = [header.join(',')]
@@ -92,7 +109,7 @@ async function main() {
       ),
     )
     .join('\n');
-  writeOut(`${outDir}/inventory.csv`, csv);
+  writeOut(`${outDir}/inventory.csv`, csv, { force });
 
   console.log('');
   console.log(`Done. ${records.length} pages.`);
@@ -130,6 +147,6 @@ function countBy(arr, fn) {
 }
 
 main().catch((e) => {
-  console.error(e);
+  console.error(String(e.message || e));
   process.exit(1);
 });

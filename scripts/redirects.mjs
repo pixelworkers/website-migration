@@ -14,16 +14,59 @@
 //   --format            all | caddy | nginx | netlify | next   (default: all)
 //   --out <dir>         output dir (default: ./out)
 //   --code              301 (permanent, default) or 302
+//   --force             overwrite existing files in <out>
 //
 // Only generates config text on disk. Applies nothing.
+//
+// The paths here come from a JSON/CSV file, so they are untrusted text that is
+// about to become webserver configuration. Every pair is validated before it is
+// emitted: each side must be a path that stays on its own origin, and must
+// contain none of the characters that would end a directive and start a new one
+// in a Caddyfile, an nginx server block, or a _redirects file.
 
 import { readFileSync } from 'node:fs';
-import { parseArgs, writeOut, toPathKey } from './lib.mjs';
+import { parseArgs, writeOut, toPathKey, urlOnOrigin, applyCommonArgs } from './lib.mjs';
 
 const args = parseArgs(process.argv.slice(2));
+const { force } = applyCommonArgs(args, { log: (m) => console.log(m) });
 const outDir = args.out || 'out';
 const format = (args.format || 'all').toLowerCase();
 const code = String(args.code || 301);
+
+// Anything that could terminate a directive, open a block, start a comment, or
+// break the line. Rejected rather than escaped: a redirect path has no business
+// containing these, and silently mangling one would be worse than skipping it.
+const CONFIG_METACHARS = /[\s{};#'"`\\$]/;
+
+/** True when `p` is safe to emit into a generated config file. */
+function validPath(p) {
+  if (typeof p !== 'string' || !p.length) return false;
+  if (p.length > 2048) return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(p)) return false;
+  if (CONFIG_METACHARS.test(p)) return false;
+  try {
+    urlOnOrigin('https://redirect-map.invalid', p);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+const skipped = [];
+
+/** Keep only pairs where BOTH sides are safe; record the rest. */
+function validate(pairs) {
+  const good = [];
+  for (const [from, to] of pairs) {
+    if (!validPath(from) || !validPath(to)) {
+      skipped.push([from, to]);
+      continue;
+    }
+    good.push([from, to]);
+  }
+  return good;
+}
 
 function pairsFromInventory(file) {
   const data = JSON.parse(readFileSync(file, 'utf8'));
@@ -51,9 +94,14 @@ if (!args.inventory && !args.map) {
   process.exit(1);
 }
 
-const pairs = args.map ? pairsFromMap(args.map) : pairsFromInventory(args.inventory);
+const pairs = validate(args.map ? pairsFromMap(args.map) : pairsFromInventory(args.inventory));
+if (skipped.length) {
+  console.warn(`Skipped ${skipped.length} unsafe redirect pair(s) — a path must be an origin-relative`);
+  console.warn('path with no whitespace, quotes, braces, semicolons, backslashes, "#" or "$":');
+  for (const [f, t] of skipped.slice(0, 10)) console.warn(`  ${JSON.stringify(f)} -> ${JSON.stringify(t)}`);
+}
 if (!pairs.length) {
-  console.error('No redirect pairs derived. Check the input file.');
+  console.error('No usable redirect pairs derived. Check the input file.');
   process.exit(1);
 }
 
@@ -90,6 +138,6 @@ for (const fmt of targets) {
     process.exit(1);
   }
   const path = `${outDir}/${exts[fmt]}`;
-  writeOut(path, generators[fmt]());
-  console.log(`Wrote ${path} (${pairs.length} redirects)`);
+  writeOut(path, generators[fmt](), { force });
+  console.log(`Wrote ${path} (${pairs.length} redirects${skipped.length ? `, ${skipped.length} skipped` : ''})`);
 }
