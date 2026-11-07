@@ -427,6 +427,7 @@ export async function fetchText(
 }
 
 function decodeEntities(s) {
+  if (!s || s.indexOf('&') < 0) return s; // nothing to decode, and this runs hot
   return s
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
@@ -453,19 +454,27 @@ function decodeEntities(s) {
  * indices in `html`.
  */
 function* eachTag(html, { maxTagBytes = LIMITS.maxTagBytes, skipRawText = false } = {}) {
+  // One reused object rather than an allocation per tag: a 5 MB page of tiny
+  // tags is well over a million iterations, and consumers here read the fields
+  // immediately instead of retaining it.
+  const tag = { raw: '', start: 0, end: 0 };
   let i = 0;
   while (i < html.length) {
     const lt = html.indexOf('<', i);
     if (lt < 0) return;
     const gt = html.indexOf('>', lt + 1);
     if (gt < 0) return;
-    const raw = gt - lt - 1 <= maxTagBytes ? html.slice(lt + 1, gt) : null;
-    if (raw !== null) yield { raw, start: lt, end: gt };
     i = gt + 1;
+    if (gt - lt - 1 > maxTagBytes) continue;
+    tag.raw = html.slice(lt + 1, gt);
+    tag.start = lt;
+    tag.end = gt;
+    yield tag;
     // `<script>` and `<style>` bodies are CDATA, not markup: a `<h1>` or an
-    // `<a href>` inside one is a string literal, not an element.
-    if (skipRawText && raw !== null) {
-      const name = tagName(raw);
+    // `<a href>` inside one is a string literal, not an element. Both names
+    // start with "s", so one charCode test skips the work on every other tag.
+    if (skipRawText && (tag.raw.charCodeAt(0) | 32) === 115) {
+      const name = tagName(tag.raw);
       if (name === 'script' || name === 'style') {
         const after = indexAfterClose(html, name, i);
         if (after < 0) return; // unterminated block — nothing after it is markup
@@ -475,10 +484,26 @@ function* eachTag(html, { maxTagBytes = LIMITS.maxTagBytes, skipRawText = false 
   }
 }
 
-/** Tag name of a tag body ('meta charset="x"' -> 'meta', '/h1' -> '/h1'). */
+/**
+ * Tag name of a tag body ('meta charset="x"' -> 'meta', '/h1' -> '/h1').
+ *
+ * Hand-rolled rather than `/^\/?[a-zA-Z][a-zA-Z0-9:-]{0,30}/` because this runs
+ * once per tag — over a million times on a 5 MB page of small tags — and the
+ * regex engine's setup cost dominates at that count.
+ */
 function tagName(raw) {
-  const m = /^\/?[a-zA-Z][a-zA-Z0-9:-]{0,30}/.exec(raw);
-  return m ? m[0].toLowerCase() : '';
+  const len = raw.length;
+  let i = raw.charCodeAt(0) === 47 /* / */ ? 1 : 0;
+  const first = i;
+  while (i < len && i - first <= 30) {
+    const c = raw.charCodeAt(i);
+    const alpha = (c >= 97 && c <= 122) || (c >= 65 && c <= 90);
+    const extra = i > first && ((c >= 48 && c <= 57) || c === 58 /* : */ || c === 45 /* - */);
+    if (!alpha && !extra) break;
+    i++;
+  }
+  if (i === first) return ''; // must start with a letter
+  return raw.slice(0, i).toLowerCase();
 }
 
 // Runs only against one tag body, which `eachTag` has already bounded to
@@ -527,26 +552,36 @@ function collapse(s) {
  */
 function visibleText(html) {
   const parts = [];
+  // A tag becomes one space, but a *run* of tags still becomes one space. On
+  // `'<b></b>'` repeated to the 5 MB cap that is the difference between one
+  // array entry and 1.4 million of them.
+  let pendingSep = false;
   let i = 0;
   while (i < html.length) {
     const lt = html.indexOf('<', i);
     if (lt < 0) {
+      if (pendingSep) parts.push(' ');
       parts.push(html.slice(i));
       break;
     }
-    if (lt > i) parts.push(html.slice(i, lt));
+    if (lt > i) {
+      if (pendingSep) parts.push(' ');
+      parts.push(html.slice(i, lt));
+      pendingSep = false;
+    }
     const gt = html.indexOf('>', lt + 1);
     if (gt < 0) break; // unterminated tag — nothing after it is markup
-    const name = tagName(html.slice(lt + 1, lt + 12));
-    if (name === 'script' || name === 'style') {
-      const after = indexAfterClose(html, name, gt + 1);
-      if (after < 0) break; // unterminated block — drop the remainder
-      parts.push(' ');
-      i = after;
-      continue;
-    }
-    parts.push(' ');
+    pendingSep = true;
     i = gt + 1;
+    // Only "script" and "style" need the name, and both start with "s".
+    if ((html.charCodeAt(lt + 1) | 32) === 115) {
+      const name = tagName(html.slice(lt + 1, Math.min(lt + 12, gt)));
+      if (name === 'script' || name === 'style') {
+        const after = indexAfterClose(html, name, i);
+        if (after < 0) break; // unterminated block — drop the remainder
+        i = after;
+      }
+    }
   }
   return parts.join('');
 }
@@ -589,6 +624,12 @@ export function extract(
   let metaDescription = '';
   let canonical = '';
   for (const tag of eachTag(head, { skipRawText: true })) {
+    // Only title/meta/link/body matter; reject on the first character rather
+    // than lowercasing a name for every tag on the page.
+    const c0 = tag.raw.charCodeAt(0) | 32;
+    if (c0 !== 116 /* t */ && c0 !== 109 /* m */ && c0 !== 108 /* l */ && c0 !== 98 /* b */) {
+      continue;
+    }
     const name = tagName(tag.raw);
     if (name === 'title') {
       if (title === null) {
@@ -620,6 +661,8 @@ export function extract(
   const links = [];
   const seen = new Set();
   for (const tag of eachTag(body, { skipRawText: true })) {
+    const c0 = tag.raw.charCodeAt(0) | 32;
+    if (c0 !== 104 /* h */ && c0 !== 97 /* a */) continue;
     const name = tagName(tag.raw);
     if (name === 'h1') {
       if (h1 === null) {
@@ -658,9 +701,16 @@ export function parseSitemap(xml, { maxUrls = LIMITS.maxSitemapUrls } = {}) {
   if (!xml || typeof xml !== 'string') return { sitemaps: [], urls: [] };
   const locs = [];
   for (const tag of eachTag(xml)) {
+    // Two cheap rejects before any allocation: the tag name must be able to be
+    // "loc", and it must have text after it. A document that is nothing but
+    // `<loc>` repeated to the 5 MB cap is a million iterations, so neither a
+    // name lowercase nor an entity decode may run per tag here.
+    if ((tag.raw.charCodeAt(0) | 32) !== 108 /* l */) continue;
+    const from = tag.end + 1;
+    const stop = xml.indexOf('<', from);
+    if (stop === from) continue; // empty <loc>
     if (tagName(tag.raw) !== 'loc') continue;
-    const stop = xml.indexOf('<', tag.end + 1);
-    const text = xml.slice(tag.end + 1, stop < 0 ? xml.length : stop);
+    const text = xml.slice(from, stop < 0 ? xml.length : stop);
     const loc = decodeEntities(text.slice(0, LIMITS.maxFieldBytes)).trim();
     if (loc) locs.push(loc);
     if (locs.length >= maxUrls) break;
