@@ -26,9 +26,9 @@ Copy this folder into your skills directory so Claude Code can discover it:
 
 ```bash
 # project-scoped
-cp -r claude-site-migration .claude/skills/site-migration
+cp -r wordpress-migration .claude/skills/site-migration
 # or user-scoped (all projects)
-cp -r claude-site-migration ~/.claude/skills/site-migration
+cp -r wordpress-migration ~/.claude/skills/site-migration
 ```
 
 Then just describe the migration to Claude Code — e.g. *"move my WordPress site
