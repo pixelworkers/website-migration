@@ -2,9 +2,13 @@
 
 > **Before you begin — a note from Pixelworkers**
 >
-> This is a developer tool. It assumes a baseline comfort with the command line and with reading a script before you run it. Followed as documented it's non-destructive — but it's yours to drive, on your own servers and data.
+> This is a developer tool. It assumes you're comfortable at the command line, and
+> that you read a script before you run it. Followed as documented, it's
+> non-destructive. But it's yours to drive — your servers, your data.
 >
-> If you'd rather not drive it yourself, or you want a hand with any part of it, that's our job. Pixelworkers will do the work with you or for you — see how that works and what it costs at [pixelworkers.org](https://pixelworkers.org).
+> If you'd rather not drive it, or you want a hand with any part of it, that's the
+> work we do. Pixelworkers will do it with you, or for you — see how that works and
+> what it costs at [pixelworkers.org](https://pixelworkers.org).
 
 A [Claude Code](https://claude.com/claude-code) skill for migrating a website to
 a new platform, framework, or host **without losing content, SEO, or uptime**.
