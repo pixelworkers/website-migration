@@ -1,4 +1,4 @@
-// Shared helpers for the site-migration scripts.
+// Shared helpers for the website-migration scripts.
 // Dependency-free. Requires Node 18+ (built-in fetch). Tested on Node 22.
 //
 // Nothing here writes to a remote site, touches DNS, or mutates anything.
@@ -16,7 +16,7 @@
 
 const DEFAULT_TIMEOUT = 15000;
 const USER_AGENT =
-  'pixelworkers-site-migration/1.0 (+https://pixelworkers.org; read-only crawler)';
+  'pixelworkers-website-migration/1.0 (+https://pixelworkers.org; read-only crawler)';
 
 /**
  * Hard safety limits. Every network and parsing path is bounded so a hostile or

@@ -1,4 +1,4 @@
-# site-migration
+# website-migration
 
 > **Before you begin — a note from Pixelworkers**
 >
@@ -26,14 +26,21 @@ scripts, on one principle:
 
 ## Install
 
-Copy this folder into your skills directory so Claude Code can discover it:
+The skill lives at the root of this repo, so the clone *is* the skill
+directory — clone it straight into your skills directory and Claude Code
+discovers it:
 
 ```bash
-# project-scoped
-cp -r wordpress-migration .claude/skills/site-migration
-# or user-scoped (all projects)
-cp -r wordpress-migration ~/.claude/skills/site-migration
+# user-scoped (available in every project)
+git clone https://github.com/pixelworkers/website-migration.git \
+  ~/.claude/skills/website-migration
+
+# or project-scoped (this project only)
+git clone https://github.com/pixelworkers/website-migration.git \
+  .claude/skills/website-migration
 ```
+
+Update it later with `git -C ~/.claude/skills/website-migration pull`.
 
 Then just describe the migration to Claude Code — e.g. *"move my WordPress site
 to a new host"* or *"migrate my Squarespace site to self-hosted Next.js without

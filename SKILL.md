@@ -1,5 +1,5 @@
 ---
-name: site-migration
+name: website-migration
 description: >-
   Migrate a website to a new host, platform, or framework without losing
   content, SEO, or uptime — including the plain WordPress host-to-host move.
