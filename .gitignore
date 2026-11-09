@@ -1,0 +1,22 @@
+# Script output / reports
+out/
+out-*/
+*.report.json
+inventory.json
+inventory.csv
+parity-report.*
+link-report.*
+
+# Redirect maps generated locally
+_redirects
+Caddyfile.redirects
+redirects.nginx.conf
+redirects.next.js
+
+# Node
+node_modules/
+npm-debug.log*
+.DS_Store
+
+# User-supplied migration inputs
+mapping.csv

@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No dependencies to install — the scripts and tests use Node built-ins
+      # only. Anything that would need `npm install` does not belong here.
+      - name: Assert the repo stays dependency-free
+        shell: bash
+        run: |
+          for f in package.json package-lock.json yarn.lock pnpm-lock.yaml node_modules; do
+            if [ -e "$f" ]; then echo "::error::$f exists; this repo is meant to be dependency-free"; exit 1; fi
+          done
+
+      - name: Syntax-check every script
+        shell: bash
+        run: |
+          status=0
+          for f in scripts/*.mjs tests/*.mjs; do
+            echo "node --check $f"
+            node --check "$f" || status=1
+          done
+          exit $status
+
+      # The suite covers the two classes of bug this tooling is exposed to:
+      # SSRF through URLs harvested off a remote site, and quadratic parsing of
+      # hostile HTML/XML. Both have regression tests built at the real 5 MB
+      # body cap, with a hard time budget, so a timing regression fails here
+      # rather than in front of a client site.
+      - name: Run tests
+        run: node --test tests/*.test.mjs
+
+      - name: Smoke-test the CLI entry points
+        shell: bash
+        run: |
+          status=0
+          for f in scripts/inventory.mjs scripts/parity.mjs scripts/linkcheck.mjs scripts/redirects.mjs; do
+            out=$(node "$f" 2>&1 || true)
+            case "$out" in
+              *Usage:*|*Provide*) echo "ok: $f prints usage with no args" ;;
+              *) echo "::error::$f did not print usage with no args: $out"; status=1 ;;
+            esac
+          done
+          exit $status
